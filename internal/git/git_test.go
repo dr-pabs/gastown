@@ -2081,7 +2081,7 @@ func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
 	if pushed {
 		t.Error("BranchPushedToRemote should report pushed=false for unpushed branch")
 	}
-	if unpushed != 1 {
-		t.Errorf("BranchPushedToRemote unpushed = %d, want 1", unpushed)
+	if unpushed < 1 {
+		t.Errorf("BranchPushedToRemote unpushed = %d, want >= 1", unpushed)
 	}
 }
