@@ -1783,11 +1783,26 @@ func TestCleanExcludingRuntime(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "unpushed commits block",
+			// Unpushed commits alone do not affect CleanExcludingRuntime — this
+			// function only evaluates uncommitted file changes. Unpushed commits
+			// are handled separately by the CommitsAhead check in gt done (gas-7vg).
+			name: "unpushed commits alone do not block",
 			s: UncommittedWorkStatus{
 				UnpushedCommits: 2,
 			},
-			want: false,
+			want: true,
+		},
+		{
+			// The primary bug scenario (gas-7vg): polecat commits work (1 unpushed
+			// commit) then calls gt done with only infrastructure files untracked.
+			// CleanExcludingRuntime must return true so gt done is not blocked.
+			name: "unpushed commit with only runtime artifacts",
+			s: UncommittedWorkStatus{
+				HasUncommittedChanges: true,
+				UnpushedCommits:       1,
+				UntrackedFiles:        []string{".beads/", ".claude/commands/done.md", ".runtime/state.json"},
+			},
+			want: true,
 		},
 		{
 			name: "pycache untracked",

@@ -1540,8 +1540,15 @@ func isGasTownRuntimePath(path string) bool {
 // CleanExcludingRuntime returns true if the only uncommitted changes are Gas Town
 // runtime artifacts (.beads/, .claude/, .runtime/, .logs/, __pycache__/).
 // Used by gt done to avoid blocking completion on toolchain-managed files.
+//
+// Note: UnpushedCommits is intentionally NOT checked here. This function only
+// evaluates whether uncommitted *file* changes are runtime artifacts. Unpushed
+// commits represent committed (but not yet pushed) work and are handled separately
+// by the CommitsAhead check in gt done. Including UnpushedCommits here caused
+// gt done to block when polecats committed their work and called gt done with
+// only infrastructure files untracked (gas-7vg).
 func (s *UncommittedWorkStatus) CleanExcludingRuntime() bool {
-	if s.StashCount > 0 || s.UnpushedCommits > 0 {
+	if s.StashCount > 0 {
 		return false
 	}
 
