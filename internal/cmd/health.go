@@ -8,13 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/health"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -35,14 +35,16 @@ type HealthReport struct {
 }
 
 type ServerHealth struct {
-	Running        bool          `json:"running"`
-	PID            int           `json:"pid,omitempty"`
-	Port           int           `json:"port,omitempty"`
-	LatencyMs      int64         `json:"latency_ms,omitempty"`
-	Connections    int           `json:"connections,omitempty"`
-	MaxConnections int           `json:"max_connections,omitempty"`
-	DiskUsageBytes int64         `json:"disk_usage_bytes,omitempty"`
-	DiskUsageHuman string        `json:"disk_usage_human,omitempty"`
+	Running            bool    `json:"running"`
+	PID                int     `json:"pid,omitempty"`
+	Port               int     `json:"port,omitempty"`
+	LatencyMs          int64   `json:"latency_ms,omitempty"`
+	Connections        int     `json:"connections,omitempty"`
+	MaxConnections     int     `json:"max_connections,omitempty"`
+	DiskUsageBytes     int64   `json:"disk_usage_bytes,omitempty"`
+	DiskUsageHuman     string  `json:"disk_usage_human,omitempty"`
+	LastCommitAgeSec   float64 `json:"last_commit_age_seconds,omitempty"`
+	LastCommitDB       string  `json:"last_commit_db,omitempty"`
 }
 
 type DatabaseHealth struct {
@@ -167,12 +169,16 @@ func checkServerHealth(townRoot string) *ServerHealth {
 	sh.MaxConnections = metrics.MaxConnections
 	sh.DiskUsageBytes = metrics.DiskUsageBytes
 	sh.DiskUsageHuman = metrics.DiskUsageHuman
+	if metrics.LastCommitAge > 0 {
+		sh.LastCommitAgeSec = metrics.LastCommitAge.Seconds()
+		sh.LastCommitDB = metrics.LastCommitDB
+	}
 
 	return sh
 }
 
 func checkDatabaseHealth(port int) []DatabaseHealth {
-	productionDBs := []string{"hq", "beads", "gastown"}
+	productionDBs := []string{"hq", "gt", "mo"}
 	var results []DatabaseHealth
 
 	for _, dbName := range productionDBs {
@@ -208,7 +214,7 @@ func checkDatabaseHealth(port int) []DatabaseHealth {
 }
 
 func checkPollution(port int) []PollutionRecord {
-	productionDBs := []string{"hq", "beads", "gastown"}
+	productionDBs := []string{"hq", "gt", "mo"}
 	var records []PollutionRecord
 
 	// Known pollution patterns to check in the issues table.
@@ -220,7 +226,7 @@ func checkPollution(port int) []PollutionRecord {
 		{"title LIKE '--%'", "--help artifacts"},
 		{"title LIKE 'Usage: %'", "CLI usage output"},
 		{"id LIKE 'offlinebrew-%'", "offlinebrew test prefix"},
-		{"id LIKE '%-wisp-%'", "wisp ID in issues table"},
+		{"id LIKE '%-wisp-%' AND (ephemeral IS NULL OR ephemeral = false)", "non-ephemeral wisp ID in issues table"},
 		{"title LIKE 'Test Issue%'", "test issue title"},
 		{"id LIKE 'test%'", "test ID prefix"},
 	}
@@ -302,54 +308,14 @@ func checkBackupHealth(townRoot string) *BackupHealth {
 	return bh
 }
 
+// checkProcessHealth finds zombie Dolt servers (not on the expected port).
+// Uses lsof-based port discovery instead of pgrep/ps string matching (ZFC fix: gt-fj87).
 func checkProcessHealth(expectedPort int) *ProcessHealth {
-	ph := &ProcessHealth{}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "pgrep", "-f", "dolt sql-server")
-	output, err := cmd.Output()
-	if err != nil {
-		return ph
+	result := health.FindZombieServers([]int{expectedPort})
+	return &ProcessHealth{
+		ZombieCount: result.Count,
+		ZombiePIDs:  result.PIDs,
 	}
-
-	expectedPortStr := strconv.Itoa(expectedPort)
-	pids := strings.Fields(strings.TrimSpace(string(output)))
-
-	for _, pidStr := range pids {
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			continue
-		}
-
-		psCmd := exec.CommandContext(ctx, "ps", "-p", pidStr, "-o", "command=")
-		psOutput, err := psCmd.Output()
-		if err != nil {
-			continue
-		}
-
-		cmdline := strings.TrimSpace(string(psOutput))
-		if !strings.Contains(cmdline, "dolt") || !strings.Contains(cmdline, "sql-server") {
-			continue
-		}
-
-		// Skip expected servers (prod port).
-		if strings.Contains(cmdline, "--port "+expectedPortStr) ||
-			strings.Contains(cmdline, "--port="+expectedPortStr) {
-			continue
-		}
-
-		// Skip if no explicit port (could be default config).
-		if !strings.Contains(cmdline, "--port") && !strings.Contains(cmdline, "-P ") {
-			continue
-		}
-
-		ph.ZombieCount++
-		ph.ZombiePIDs = append(ph.ZombiePIDs, pid)
-	}
-
-	return ph
 }
 
 func checkOrphanDBs(townRoot string) []OrphanDB {

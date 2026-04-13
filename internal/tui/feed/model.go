@@ -10,7 +10,9 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Panel represents which panel has focus
@@ -629,13 +631,13 @@ func (m *Model) attachToSelected() (tea.Model, tea.Cmd) {
 // and role shortcuts for singletons (mayor, deacon, witness, refinery).
 func nudgeTarget(agent *ProblemAgent) string {
 	switch agent.Role {
-	case "mayor", "deacon":
+	case constants.RoleMayor, constants.RoleDeacon:
 		return agent.Role
-	case "witness", "refinery":
+	case constants.RoleWitness, constants.RoleRefinery:
 		return agent.Rig + "/" + agent.Role
-	case "crew":
+	case constants.RoleCrew:
 		return agent.Rig + "/crew/" + agent.Name
-	case "polecat":
+	case constants.RolePolecat:
 		return agent.Rig + "/" + agent.Name
 	default:
 		// Fallback to session ID
@@ -652,6 +654,7 @@ func (m *Model) nudgeSelected() (tea.Model, tea.Cmd) {
 	// Run gt nudge with proper target format
 	target := nudgeTarget(agent)
 	c := exec.Command("gt", "nudge", target, "continue")
+	util.SetDetachedProcessGroup(c)
 	return m, tea.ExecProcess(c, func(err error) tea.Msg {
 		// Refresh problems after nudge
 		return problemsTickMsg{}
@@ -667,6 +670,7 @@ func (m *Model) handoffSelected() (tea.Model, tea.Cmd) {
 	// Run gt nudge with proper target format
 	target := nudgeTarget(agent)
 	c := exec.Command("gt", "nudge", target, "handoff")
+	util.SetDetachedProcessGroup(c)
 	return m, tea.ExecProcess(c, func(err error) tea.Msg {
 		return problemsTickMsg{}
 	})

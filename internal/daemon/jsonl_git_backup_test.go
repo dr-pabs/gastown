@@ -250,11 +250,12 @@ func TestVerifyExportCounts_WithinThreshold(t *testing.T) {
 
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 
-	// 110 records = 10% change, under 20% threshold
-	counts := map[string]int{"testdb": 110}
+	// 130 records = 30% increase. With 0.20 threshold and 2x asymmetric
+	// multiplier for increases, effective threshold is 0.40, so 30% is fine.
+	counts := map[string]int{"testdb": 130}
 	spikes := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.20)
 	if len(spikes) != 0 {
-		t.Errorf("expected no spikes for 10%% change, got %v", spikes)
+		t.Errorf("expected no spikes for 30%% increase (effective threshold 40%%), got %v", spikes)
 	}
 }
 
@@ -270,8 +271,9 @@ func TestVerifyExportCounts_ExceedsThreshold(t *testing.T) {
 
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 
-	// 130 records = 30% jump, exceeds 20% threshold
-	counts := map[string]int{"testdb": 130}
+	// 200 records = 100% jump. Even with 2x asymmetric multiplier (effective
+	// threshold 0.40), 100% exceeds it.
+	counts := map[string]int{"testdb": 200}
 	spikes := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.20)
 	if len(spikes) != 1 {
 		t.Fatalf("expected 1 spike, got %d", len(spikes))
@@ -279,8 +281,8 @@ func TestVerifyExportCounts_ExceedsThreshold(t *testing.T) {
 	if spikes[0].DB != "testdb" {
 		t.Errorf("expected spike for testdb, got %s", spikes[0].DB)
 	}
-	if spikes[0].Previous != 100 || spikes[0].Current != 130 {
-		t.Errorf("expected 100→130, got %d→%d", spikes[0].Previous, spikes[0].Current)
+	if spikes[0].Previous != 100 || spikes[0].Current != 200 {
+		t.Errorf("expected 100→200, got %d→%d", spikes[0].Previous, spikes[0].Current)
 	}
 }
 
@@ -295,7 +297,8 @@ func TestVerifyExportCounts_Drop(t *testing.T) {
 
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 
-	// 60 records = 40% drop, exceeds 20% threshold
+	// 60 records = 40% drop. Drops use the base threshold (no 2x multiplier)
+	// because losing data is more suspicious than gaining it.
 	counts := map[string]int{"testdb": 60}
 	spikes := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.20)
 	if len(spikes) != 1 {
@@ -303,6 +306,144 @@ func TestVerifyExportCounts_Drop(t *testing.T) {
 	}
 	if spikes[0].Delta < 0.3 {
 		t.Errorf("expected delta > 0.3, got %f", spikes[0].Delta)
+	}
+}
+
+func TestVerifyExportCounts_SmallAbsoluteChangeIgnored(t *testing.T) {
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+
+	// Small database: 10 records
+	dbDir := filepath.Join(gitRepo, "testdb")
+	os.MkdirAll(dbDir, 0755)
+	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 10)
+	commitAll(t, gitRepo, "baseline")
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	// 5 records = 50% drop, but only 5 records absolute change.
+	// Below minAbsoluteDelta (20), so should NOT spike.
+	counts := map[string]int{"testdb": 5}
+	spikes := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.20)
+	if len(spikes) != 0 {
+		t.Errorf("expected no spikes for small absolute change (<20 records), got %v", spikes)
+	}
+}
+
+func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+
+	dbDir := filepath.Join(gitRepo, "testdb")
+	os.MkdirAll(dbDir, 0755)
+	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 100)
+	commitAll(t, gitRepo, "baseline")
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	// 70 records = 30% drop at 0.20 threshold → should spike (drops use base threshold)
+	counts := map[string]int{"testdb": 70}
+	spikes := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.20)
+	if len(spikes) != 1 {
+		t.Fatalf("expected 1 spike for 30%% drop at 20%% threshold, got %d", len(spikes))
+	}
+
+	// 130 records = 30% increase at 0.20 threshold → should NOT spike (increases use 2x = 0.40)
+	counts = map[string]int{"testdb": 130}
+	spikes = d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.20)
+	if len(spikes) != 0 {
+		t.Errorf("expected no spike for 30%% increase at 40%% effective threshold, got %v", spikes)
+	}
+}
+
+func TestVerifyExportCounts_SpikeBaselineRecovery(t *testing.T) {
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+
+	// Create baseline: 1000 lines in testdb/issues.jsonl
+	dbDir := filepath.Join(gitRepo, "testdb")
+	os.MkdirAll(dbDir, 0755)
+	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 1000)
+	commitAll(t, gitRepo, "baseline")
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	// First run: 400 records = 60% drop → should spike and save baseline.
+	counts := map[string]int{"testdb": 400}
+	spikes := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50)
+	if len(spikes) != 1 {
+		t.Fatalf("expected 1 spike on first detection, got %d", len(spikes))
+	}
+
+	// Verify spike baseline was saved.
+	sb := loadSpikeBaseline(gitRepo)
+	if sb == nil {
+		t.Fatal("expected spike baseline to be saved after spike detection")
+	}
+	if sb.Counts["testdb"] != 400 {
+		t.Errorf("expected baseline count 400, got %d", sb.Counts["testdb"])
+	}
+
+	// Second run: same count (400) → stable vs spike baseline → should NOT spike.
+	counts = map[string]int{"testdb": 400}
+	spikes = d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50)
+	if len(spikes) != 0 {
+		t.Errorf("expected no spikes on second run (stable vs baseline), got %v", spikes)
+	}
+}
+
+func TestVerifyExportCounts_SpikeBaselineUnstable(t *testing.T) {
+	gitRepo := t.TempDir()
+	initGitRepo(t, gitRepo)
+
+	dbDir := filepath.Join(gitRepo, "testdb")
+	os.MkdirAll(dbDir, 0755)
+	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 1000)
+	commitAll(t, gitRepo, "baseline")
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	// First run: 400 records = 60% drop → spikes and saves baseline at 400.
+	counts := map[string]int{"testdb": 400}
+	spikes := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50)
+	if len(spikes) != 1 {
+		t.Fatalf("expected 1 spike, got %d", len(spikes))
+	}
+
+	// Second run: 100 records = still a spike vs HEAD, AND unstable vs baseline
+	// (400 → 100 = 75% drop, exceeds threshold). Should still spike.
+	counts = map[string]int{"testdb": 100}
+	spikes = d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50)
+	if len(spikes) != 1 {
+		t.Errorf("expected 1 spike for unstable count vs baseline, got %d", len(spikes))
+	}
+}
+
+func TestSpikeBaselineSaveLoadRemove(t *testing.T) {
+	dir := t.TempDir()
+
+	// No baseline file → nil.
+	if sb := loadSpikeBaseline(dir); sb != nil {
+		t.Errorf("expected nil, got %+v", sb)
+	}
+
+	// Save and load.
+	counts := map[string]int{"db1": 100, "db2": 200}
+	if err := saveSpikeBaseline(dir, counts); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	sb := loadSpikeBaseline(dir)
+	if sb == nil {
+		t.Fatal("expected non-nil after save")
+	}
+	if sb.Counts["db1"] != 100 || sb.Counts["db2"] != 200 {
+		t.Errorf("unexpected counts: %v", sb.Counts)
+	}
+
+	// Remove.
+	removeSpikeBaseline(dir)
+	if sb := loadSpikeBaseline(dir); sb != nil {
+		t.Errorf("expected nil after remove, got %+v", sb)
 	}
 }
 

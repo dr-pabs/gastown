@@ -11,33 +11,34 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/plugin"
 )
 
 // PatrolMoleculesExistCheck verifies that patrol formulas are accessible.
 // Patrols use `bd mol wisp <formula-name>` to spawn workflows, so the formulas
 // must exist in the formula search path (.beads/formulas/, ~/.beads/formulas/, or $GT_ROOT/.beads/formulas/).
 type PatrolMoleculesExistCheck struct {
-	BaseCheck
+	FixableCheck
 	missingFormulas map[string][]string // rig -> missing formula names
 }
 
 // NewPatrolMoleculesExistCheck creates a new patrol formulas exist check.
 func NewPatrolMoleculesExistCheck() *PatrolMoleculesExistCheck {
 	return &PatrolMoleculesExistCheck{
-		BaseCheck: BaseCheck{
-			CheckName:        "patrol-molecules-exist",
-			CheckDescription: "Check if patrol formulas are accessible",
-			CheckCategory:    CategoryPatrol,
+		FixableCheck: FixableCheck{
+			BaseCheck: BaseCheck{
+				CheckName:        "patrol-molecules-exist",
+				CheckDescription: "Check if patrol formulas are accessible",
+				CheckCategory:    CategoryPatrol,
+			},
 		},
 	}
 }
 
 // patrolFormulas are the required patrol formula names.
-var patrolFormulas = []string{
-	"mol-deacon-patrol",
-	"mol-witness-patrol",
-	"mol-refinery-patrol",
-}
+var patrolFormulas = constants.PatrolFormulas()
 
 // Run checks if patrol formulas are accessible.
 func (c *PatrolMoleculesExistCheck) Run(ctx *CheckContext) *CheckResult {
@@ -85,7 +86,7 @@ func (c *PatrolMoleculesExistCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d rig(s) missing patrol formulas", len(c.missingFormulas)),
 			Details: details,
-			FixHint: "Formulas should exist in .beads/formulas/ at town or rig level, or in ~/.beads/formulas/",
+			FixHint: "Run 'gt doctor --fix' to provision embedded patrol formulas",
 		}
 	}
 
@@ -128,6 +129,30 @@ func (c *PatrolMoleculesExistCheck) checkPatrolFormulas(rigPath string, townRoot
 		}
 	}
 	return missing
+}
+
+// Fix provisions missing patrol formulas from the embedded formula templates.
+// Formulas are written to each rig's .beads/formulas/ directory.
+func (c *PatrolMoleculesExistCheck) Fix(ctx *CheckContext) error {
+	if len(c.missingFormulas) == 0 {
+		return nil
+	}
+
+	var errs []string
+	for rigName := range c.missingFormulas {
+		rigPath := filepath.Join(ctx.TownRoot, rigName)
+		if _, statErr := os.Stat(rigPath); os.IsNotExist(statErr) {
+			rigPath = ctx.TownRoot
+		}
+		if _, err := formula.ProvisionFormulas(rigPath); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", rigName, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("partial fix: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // PatrolHooksWiredCheck verifies that hooks trigger patrol execution.
@@ -299,7 +324,10 @@ func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string
 	}
 
 	var stuck []string
-	cutoff := time.Now().Add(-c.stuckThreshold)
+	// Use UTC for cutoff: Dolt stores timestamps in UTC, and time.Parse
+	// without timezone info returns UTC times. Using local time here caused
+	// false "future timestamp" alarms every evening PDT (gt-ty4).
+	cutoff := time.Now().UTC().Add(-c.stuckThreshold)
 
 	for _, rec := range records[1:] { // Skip CSV header
 		if len(rec) < 4 {
@@ -319,8 +347,8 @@ func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string
 		}
 
 		if !t.IsZero() && t.Before(cutoff) {
-			stuck = append(stuck, fmt.Sprintf("%s: %s (%s) - stale since %s",
-				rigName, id, title, t.Format("2006-01-02 15:04")))
+			stuck = append(stuck, fmt.Sprintf("%s: %s (%s) - stale since %s UTC",
+				rigName, id, title, t.UTC().Format("2006-01-02 15:04")))
 		}
 	}
 
@@ -392,6 +420,95 @@ func (c *PatrolPluginsAccessibleCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 	return nil
+}
+
+// PatrolPluginDriftCheck detects when runtime plugins are out of sync with source.
+type PatrolPluginDriftCheck struct {
+	FixableCheck
+	sourceDir string
+	targetDir string
+}
+
+// NewPatrolPluginDriftCheck creates a new plugin drift check.
+func NewPatrolPluginDriftCheck() *PatrolPluginDriftCheck {
+	return &PatrolPluginDriftCheck{
+		FixableCheck: FixableCheck{
+			BaseCheck: BaseCheck{
+				CheckName:        "patrol-plugin-drift",
+				CheckDescription: "Check if runtime plugins match source repo",
+				CheckCategory:    CategoryPatrol,
+			},
+		},
+	}
+}
+
+// Run checks for plugin drift between source and runtime.
+func (c *PatrolPluginDriftCheck) Run(ctx *CheckContext) *CheckResult {
+	c.targetDir = filepath.Join(ctx.TownRoot, "plugins")
+
+	sourceDir, err := plugin.FindGastownSource(ctx.TownRoot)
+	if err != nil {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusOK,
+			Message: "Plugin source not found (skipping drift check)",
+		}
+	}
+	c.sourceDir = sourceDir
+
+	// Skip if source and target are the same directory
+	srcAbs, _ := filepath.Abs(sourceDir)
+	tgtAbs, _ := filepath.Abs(c.targetDir)
+	if srcAbs == tgtAbs {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusOK,
+			Message: "Source and runtime are same directory",
+		}
+	}
+
+	report, err := plugin.DetectDrift(sourceDir, c.targetDir)
+	if err != nil {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusError,
+			Message: "Failed to check plugin drift",
+			Details: []string{err.Error()},
+		}
+	}
+
+	if !report.HasDrift() {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusOK,
+			Message: "Runtime plugins match source",
+		}
+	}
+
+	var details []string
+	for _, d := range report.Drifted {
+		details = append(details, fmt.Sprintf("%s: content differs", d.Name))
+	}
+	for _, name := range report.Missing {
+		details = append(details, fmt.Sprintf("%s: missing from runtime", name))
+	}
+
+	return &CheckResult{
+		Name:    c.Name(),
+		Status:  StatusWarning,
+		Message: fmt.Sprintf("%d plugin(s) out of sync", len(report.Drifted)+len(report.Missing)),
+		Details: details,
+		FixHint: "Run 'gt plugin sync' to update runtime plugins",
+	}
+}
+
+// Fix syncs plugins from source to runtime.
+func (c *PatrolPluginDriftCheck) Fix(ctx *CheckContext) error {
+	if c.sourceDir == "" || c.targetDir == "" {
+		return fmt.Errorf("drift check did not run; cannot fix")
+	}
+	_, err := plugin.SyncPlugins(c.sourceDir, c.targetDir, false)
+	return err
 }
 
 // discoverRigs finds all registered rigs.

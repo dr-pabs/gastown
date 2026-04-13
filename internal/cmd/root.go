@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -65,12 +66,15 @@ var beadsExemptCommands = map[string]bool{
 	"install":    true,
 	"tap":        true,
 	"dnd":        true,
+	"estop":      true, // E-stop must work when Dolt is down
+	"thaw":       true, // Thaw must work when Dolt is down
 	"signal":        true, // Hook signal handlers must be fast, handle beads internally
 	"metrics":       true, // Metrics reads local JSONL, no beads needed
 	"krc":           true, // KRC doesn't require beads
 	"run-migration":       true, // Migration orchestrator handles its own beads checks
 	"health":              true, // Health check doesn't require beads
 	"upgrade":             true, // Post-install migration orchestrator
+	"heartbeat":           true, // Heartbeat state update — must be fast and dependency-free
 }
 
 // Commands exempt from the town root branch warning.
@@ -80,6 +84,8 @@ var branchCheckExemptCommands = map[string]bool{
 	"help":       true,
 	"completion": true,
 	"doctor":     true, // Used to fix the problem
+	"estop":      true, // Emergency stop must always work
+	"thaw":       true, // Thaw must always work
 	"install":    true, // Initial setup
 	"git-init":   true, // Git setup
 	"upgrade":    true, // Post-install migration
@@ -92,12 +98,13 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	// Warning only - doesn't block execution.
 	// Skip warning when Build was set by a package manager (e.g. Homebrew sets
 	// Build to "Homebrew" via ldflags but doesn't set BuiltProperly).
-	if BuiltProperly == "" && Build == "dev" {
-		fmt.Fprintln(os.Stderr, "WARNING: This binary was built with 'go build' directly.")
-		fmt.Fprintln(os.Stderr, "         Use 'make build' to create a properly signed binary.")
+	if BuiltProperly == "" && Build == "dev" && runtime.GOOS == "darwin" {
+		fmt.Fprintln(os.Stderr, "ERROR: This binary was built with 'go build' directly.")
+		fmt.Fprintln(os.Stderr, "       macOS will SIGKILL unsigned binaries. Use 'make build' instead.")
 		if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-			fmt.Fprintf(os.Stderr, "         Run from: %s\n", gtRoot)
+			fmt.Fprintf(os.Stderr, "       Run from: %s\n", gtRoot)
 		}
+		os.Exit(1)
 	}
 
 	// Initialize CLI theme (dark/light mode support)
@@ -137,7 +144,7 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	touchPolecatHeartbeat()
 
 	// Skip beads check for exempt commands
-	if beadsExemptCommands[cmdName] {
+	if beadsExemptCommands[cmdName] || isRoleCommand(cmd) {
 		return nil
 	}
 
@@ -148,6 +155,18 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "   Run %s for details.\n\n", style.Dim.Render("gt doctor"))
 	}
 	return nil
+}
+
+// isRoleCommand returns true when the invoked command belongs to the `gt role` tree.
+// Role introspection commands are often used in scripts and tests that expect clean
+// output; beads version warnings are unrelated noise for these commands.
+func isRoleCommand(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Name() == "role" {
+			return true
+		}
+	}
+	return false
 }
 
 // initCLITheme initializes the CLI color theme based on settings and environment.
@@ -218,7 +237,7 @@ func warnIfTownRootOffMain() {
 	}
 
 	branch := strings.TrimSpace(string(out))
-	if branch == "" || branch == "main" || branch == "master" {
+	if branch == "" || branch == "main" || branch == "master" || branch == "gt_managed" {
 		return
 	}
 

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -125,7 +126,10 @@ type PatrolsConfig struct {
 	WispReaper     *WispReaperConfig      `json:"wisp_reaper,omitempty"`
 	DoctorDog      *DoctorDogConfig       `json:"doctor_dog,omitempty"`
 	CompactorDog           *CompactorDogConfig            `json:"compactor_dog,omitempty"`
+	CheckpointDog          *CheckpointDogConfig           `json:"checkpoint_dog,omitempty"`
 	ScheduledMaintenance   *ScheduledMaintenanceConfig    `json:"scheduled_maintenance,omitempty"`
+	MainBranchTest         *MainBranchTestConfig          `json:"main_branch_test,omitempty"`
+	QuotaDog               *QuotaDogConfig                `json:"quota_dog,omitempty"`
 	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
 }
 
@@ -204,7 +208,7 @@ type DaemonPatrolConfig struct {
 
 // PatrolConfigFile returns the path to the patrol config file.
 func PatrolConfigFile(townRoot string) string {
-	return filepath.Join(townRoot, "mayor", "daemon.json")
+	return filepath.Join(townRoot, constants.RoleMayor, "daemon.json")
 }
 
 // LoadPatrolConfig loads patrol configuration from mayor/daemon.json.
@@ -280,11 +284,29 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.CompactorDog.Enabled
 	}
+	if patrol == "checkpoint_dog" {
+		if config == nil || config.Patrols == nil || config.Patrols.CheckpointDog == nil {
+			return false
+		}
+		return config.Patrols.CheckpointDog.Enabled
+	}
 	if patrol == "scheduled_maintenance" {
 		if config == nil || config.Patrols == nil || config.Patrols.ScheduledMaintenance == nil {
 			return false
 		}
 		return config.Patrols.ScheduledMaintenance.Enabled
+	}
+	if patrol == "main_branch_test" {
+		if config == nil || config.Patrols == nil || config.Patrols.MainBranchTest == nil {
+			return false
+		}
+		return config.Patrols.MainBranchTest.Enabled
+	}
+	if patrol == "quota_dog" {
+		if config == nil || config.Patrols == nil || config.Patrols.QuotaDog == nil {
+			return false
+		}
+		return config.Patrols.QuotaDog.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {
@@ -292,15 +314,15 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 	}
 
 	switch patrol {
-	case "refinery":
+	case constants.RoleRefinery:
 		if config.Patrols.Refinery != nil {
 			return config.Patrols.Refinery.Enabled
 		}
-	case "witness":
+	case constants.RoleWitness:
 		if config.Patrols.Witness != nil {
 			return config.Patrols.Witness.Enabled
 		}
-	case "deacon":
+	case constants.RoleDeacon:
 		if config.Patrols.Deacon != nil {
 			return config.Patrols.Deacon.Enabled
 		}
@@ -319,16 +341,48 @@ func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 	}
 
 	switch patrol {
-	case "refinery":
+	case constants.RoleRefinery:
 		if config.Patrols.Refinery != nil {
 			return config.Patrols.Refinery.Rigs
 		}
-	case "witness":
+	case constants.RoleWitness:
 		if config.Patrols.Witness != nil {
 			return config.Patrols.Witness.Rigs
 		}
 	}
 	return nil // All rigs
+}
+
+// loadDisabledPatrolsFromTownSettings loads the disabled_patrols list from
+// town settings (settings/config.json) as a set for O(1) lookup.
+func loadDisabledPatrolsFromTownSettings(townRoot string) map[string]bool {
+	settingsPath := filepath.Join(townRoot, "settings", "config.json")
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // G304: path constructed internally
+	if err != nil {
+		return nil
+	}
+	var raw struct {
+		DisabledPatrols []string `json:"disabled_patrols"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil || len(raw.DisabledPatrols) == 0 {
+		return nil
+	}
+	disabled := make(map[string]bool, len(raw.DisabledPatrols))
+	for _, p := range raw.DisabledPatrols {
+		disabled[p] = true
+	}
+	return disabled
+}
+
+// isPatrolActive checks whether a patrol should run, combining the
+// daemon patrol config (mayor/daemon.json) with the town-level
+// disabled_patrols list (settings/config.json). A patrol is active
+// only if it is enabled in daemon config AND not in the disabled list.
+func (d *Daemon) isPatrolActive(patrol string) bool {
+	if d.disabledPatrols[patrol] {
+		return false
+	}
+	return IsPatrolEnabled(d.patrolConfig, patrol)
 }
 
 // LifecycleAction represents a lifecycle request action.

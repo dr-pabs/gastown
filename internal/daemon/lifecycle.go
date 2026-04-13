@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // BeadsMessage represents a message from gt mail inbox --json.
@@ -42,6 +43,7 @@ func (d *Daemon) ProcessLifecycleRequests() {
 	cmd := exec.Command(d.gtPath, "mail", "inbox", "--identity", "deacon/", "--json")
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = os.Environ() // Inherit PATH to find gt executable
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -228,29 +230,29 @@ type ParsedIdentity struct {
 // All other functions should use the extracted components to look up role config.
 func parseIdentity(identity string) (*ParsedIdentity, error) {
 	switch identity {
-	case "mayor":
-		return &ParsedIdentity{RoleType: "mayor"}, nil
-	case "deacon":
-		return &ParsedIdentity{RoleType: "deacon"}, nil
+	case constants.RoleMayor:
+		return &ParsedIdentity{RoleType: constants.RoleMayor}, nil
+	case constants.RoleDeacon:
+		return &ParsedIdentity{RoleType: constants.RoleDeacon}, nil
 	}
 
 	// Pattern: <rig>-witness → witness role
 	if strings.HasSuffix(identity, "-witness") {
 		rigName := strings.TrimSuffix(identity, "-witness")
-		return &ParsedIdentity{RoleType: "witness", RigName: rigName}, nil
+		return &ParsedIdentity{RoleType: constants.RoleWitness, RigName: rigName}, nil
 	}
 
 	// Pattern: <rig>-refinery → refinery role
 	if strings.HasSuffix(identity, "-refinery") {
 		rigName := strings.TrimSuffix(identity, "-refinery")
-		return &ParsedIdentity{RoleType: "refinery", RigName: rigName}, nil
+		return &ParsedIdentity{RoleType: constants.RoleRefinery, RigName: rigName}, nil
 	}
 
 	// Pattern: <rig>-crew-<name> → crew role
 	if strings.Contains(identity, "-crew-") {
 		parts := strings.SplitN(identity, "-crew-", 2)
 		if len(parts) == 2 {
-			return &ParsedIdentity{RoleType: "crew", RigName: parts[0], AgentName: parts[1]}, nil
+			return &ParsedIdentity{RoleType: constants.RoleCrew, RigName: parts[0], AgentName: parts[1]}, nil
 		}
 	}
 
@@ -258,7 +260,7 @@ func parseIdentity(identity string) (*ParsedIdentity, error) {
 	if strings.Contains(identity, "-polecat-") {
 		parts := strings.SplitN(identity, "-polecat-", 2)
 		if len(parts) == 2 {
-			return &ParsedIdentity{RoleType: "polecat", RigName: parts[0], AgentName: parts[1]}, nil
+			return &ParsedIdentity{RoleType: constants.RolePolecat, RigName: parts[0], AgentName: parts[1]}, nil
 		}
 	}
 
@@ -266,7 +268,7 @@ func parseIdentity(identity string) (*ParsedIdentity, error) {
 	if strings.Contains(identity, "/polecats/") {
 		parts := strings.Split(identity, "/polecats/")
 		if len(parts) == 2 {
-			return &ParsedIdentity{RoleType: "polecat", RigName: parts[0], AgentName: parts[1]}, nil
+			return &ParsedIdentity{RoleType: constants.RolePolecat, RigName: parts[0], AgentName: parts[1]}, nil
 		}
 	}
 
@@ -317,17 +319,17 @@ func (d *Daemon) identityToSession(identity string) string {
 	}
 
 	switch parsed.RoleType {
-	case "mayor":
+	case constants.RoleMayor:
 		return session.MayorSessionName()
-	case "deacon":
+	case constants.RoleDeacon:
 		return session.DeaconSessionName()
-	case "witness":
+	case constants.RoleWitness:
 		return session.WitnessSessionName(session.PrefixFor(parsed.RigName))
-	case "refinery":
+	case constants.RoleRefinery:
 		return session.RefinerySessionName(session.PrefixFor(parsed.RigName))
-	case "crew":
+	case constants.RoleCrew:
 		return session.CrewSessionName(session.PrefixFor(parsed.RigName), parsed.AgentName)
-	case "polecat":
+	case constants.RolePolecat:
 		return session.PolecatSessionName(session.PrefixFor(parsed.RigName), parsed.AgentName)
 	default:
 		return ""
@@ -409,17 +411,17 @@ func (d *Daemon) getWorkDir(config *beads.RoleConfig, parsed *ParsedIdentity) st
 
 	// Fallback: use default patterns based on role type
 	switch parsed.RoleType {
-	case "mayor":
+	case constants.RoleMayor:
 		return d.config.TownRoot
-	case "deacon":
+	case constants.RoleDeacon:
 		return d.config.TownRoot
-	case "witness":
+	case constants.RoleWitness:
 		return filepath.Join(d.config.TownRoot, parsed.RigName)
-	case "refinery":
+	case constants.RoleRefinery:
 		return filepath.Join(d.config.TownRoot, parsed.RigName, "refinery", "rig")
-	case "crew":
+	case constants.RoleCrew:
 		return filepath.Join(d.config.TownRoot, parsed.RigName, "crew", parsed.AgentName)
-	case "polecat":
+	case constants.RolePolecat:
 		// New structure: polecats/<name>/<rigname>/ (for LLM ergonomics)
 		// Old structure: polecats/<name>/ (for backward compat)
 		newPath := filepath.Join(d.config.TownRoot, parsed.RigName, "polecats", parsed.AgentName, parsed.RigName)
@@ -442,21 +444,53 @@ func (d *Daemon) getNeedsPreSync(config *beads.RoleConfig, parsed *ParsedIdentit
 
 	// Fallback: roles with persistent git clones need pre-sync
 	switch parsed.RoleType {
-	case "refinery", "crew":
+	case constants.RoleRefinery, constants.RoleCrew:
 		return true
 	default:
 		return false
 	}
 }
 
+// isBuiltinClaudeStartCommand returns true if the start_command is the
+// built-in default from role TOMLs ("exec claude --dangerously-skip-permissions").
+// Custom start_commands (e.g., "exec run --town {town}") return false.
+func isBuiltinClaudeStartCommand(cmd string) bool {
+	trimmed := strings.TrimPrefix(cmd, "exec ")
+	return trimmed == "claude --dangerously-skip-permissions"
+}
+
 // getStartCommand determines the startup command for an agent.
 // Uses role config if available, then role-based agent selection, then hardcoded defaults.
 // Includes beacon + role-specific instructions in the CLI prompt.
 func (d *Daemon) getStartCommand(roleConfig *beads.RoleConfig, parsed *ParsedIdentity) string {
-	// If role config is available, use it
+	// Role config start_command: only use when the resolved agent is Claude.
+	// Built-in role TOMLs hardcode "exec claude ..." which bypasses the
+	// declarative agent resolution system. Fall through to agent resolution
+	// so non-Claude agents (copilot, codex, etc.) get the correct command.
 	if roleConfig != nil && roleConfig.StartCommand != "" {
-		// Expand any patterns in the command
-		return beads.ExpandRolePattern(roleConfig.StartCommand, d.config.TownRoot, parsed.RigName, parsed.AgentName, parsed.RoleType, session.PrefixFor(parsed.RigName))
+		rigPath := ""
+		if parsed != nil && parsed.RigName != "" {
+			rigPath = filepath.Join(d.config.TownRoot, parsed.RigName)
+		}
+		rc := config.ResolveRoleAgentConfig(parsed.RoleType, d.config.TownRoot, rigPath)
+		if !config.IsResolvedAgentClaude(rc) {
+			// Non-Claude agent: skip TOML start_command entirely (GH#2417).
+			// Built-in role TOMLs hardcode "exec claude ..." which is wrong
+			// for non-Claude agents. Fall through to BuildStartupCommandFromConfig
+			// which uses the resolved agent's command and args.
+		} else if !isBuiltinClaudeStartCommand(roleConfig.StartCommand) {
+			// Custom (non-builtin) start_command with Claude agent: use TOML
+			// pattern with template expansion.
+			cmd := beads.ExpandRolePattern(roleConfig.StartCommand, d.config.TownRoot, parsed.RigName, parsed.AgentName, parsed.RoleType, session.PrefixFor(parsed.RigName))
+			if strings.HasPrefix(cmd, "exec ") {
+				cmd = "exec env -u CLAUDECODE NODE_OPTIONS='' " + cmd[len("exec "):]
+			} else {
+				cmd = "env -u CLAUDECODE NODE_OPTIONS='' " + cmd
+			}
+			return cmd
+		}
+		// Claude agent with built-in start_command: fall through to
+		// BuildStartupCommandFromConfig for proper model flag resolution.
 	}
 
 	rigPath := ""
@@ -488,13 +522,13 @@ func (d *Daemon) getStartCommand(roleConfig *beads.RoleConfig, parsed *ParsedIde
 	defaultCmd := config.PrependEnv("exec "+runtimeConfig.BuildCommandWithPrompt(prompt), defaultEnv)
 
 	// Polecats and crew need environment variables set in the command
-	if parsed.RoleType == "polecat" {
+	if parsed.RoleType == constants.RolePolecat {
 		var sessionIDEnv string
 		if runtimeConfig.Session != nil {
 			sessionIDEnv = runtimeConfig.Session.SessionIDEnv
 		}
 		envVars := config.AgentEnv(config.AgentEnvConfig{
-			Role:         "polecat",
+			Role:         constants.RolePolecat,
 			Rig:          parsed.RigName,
 			AgentName:    parsed.AgentName,
 			TownRoot:     d.config.TownRoot,
@@ -504,13 +538,13 @@ func (d *Daemon) getStartCommand(roleConfig *beads.RoleConfig, parsed *ParsedIde
 		return config.PrependEnv("exec "+runtimeConfig.BuildCommandWithPrompt(prompt), envVars)
 	}
 
-	if parsed.RoleType == "crew" {
+	if parsed.RoleType == constants.RoleCrew {
 		var sessionIDEnv string
 		if runtimeConfig.Session != nil {
 			sessionIDEnv = runtimeConfig.Session.SessionIDEnv
 		}
 		envVars := config.AgentEnv(config.AgentEnvConfig{
-			Role:         "crew",
+			Role:         constants.RoleCrew,
 			Rig:          parsed.RigName,
 			AgentName:    parsed.AgentName,
 			TownRoot:     d.config.TownRoot,
@@ -526,20 +560,40 @@ func (d *Daemon) getStartCommand(roleConfig *beads.RoleConfig, parsed *ParsedIde
 // setSessionEnvironment sets environment variables for the tmux session.
 // Uses centralized AgentEnv for consistency, plus custom env vars from role config if available.
 func (d *Daemon) setSessionEnvironment(sessionName string, roleConfig *beads.RoleConfig, parsed *ParsedIdentity) {
+	// Resolve CLAUDE_CONFIG_DIR from accounts.json so daemon-restarted sessions
+	// use the correct account. Mirrors the crew startup path (start.go).
+	accountsPath := constants.MayorAccountsPath(d.config.TownRoot)
+	runtimeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
+	if runtimeConfigDir == "" {
+		runtimeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
+	}
+
 	// Use centralized AgentEnv for base environment variables
 	envVars := config.AgentEnv(config.AgentEnvConfig{
-		Role:      parsed.RoleType,
-		Rig:       parsed.RigName,
-		AgentName: parsed.AgentName,
-		TownRoot:  d.config.TownRoot,
+		Role:             parsed.RoleType,
+		Rig:              parsed.RigName,
+		AgentName:        parsed.AgentName,
+		TownRoot:         d.config.TownRoot,
+		RuntimeConfigDir: runtimeConfigDir,
+		SessionName:      sessionName,
 	})
 	for k, v := range envVars {
 		_ = d.tmux.SetEnvironment(sessionName, k, v)
 	}
 
-	// Set any custom env vars from role config
+	// Record agent's pane_id for ZFC-compliant liveness checks (gt-qmsx).
+	if paneID, err := d.tmux.GetPaneID(sessionName); err == nil {
+		_ = d.tmux.SetEnvironment(sessionName, "GT_PANE_ID", paneID)
+	}
+
+	// Set any custom env vars from role config.
+	// Skip keys already set by AgentEnv to prevent TOML [env] from clobbering
+	// canonical qualified values (e.g., GT_ROLE). See: https://github.com/steveyegge/gastown/issues/2492
 	if roleConfig != nil {
 		for k, v := range roleConfig.EnvVars {
+			if _, alreadySet := envVars[k]; alreadySet {
+				continue
+			}
 			expanded := beads.ExpandRolePattern(v, d.config.TownRoot, parsed.RigName, parsed.AgentName, parsed.RoleType, session.PrefixFor(parsed.RigName))
 			_ = d.tmux.SetEnvironment(sessionName, k, expanded)
 		}
@@ -548,13 +602,15 @@ func (d *Daemon) setSessionEnvironment(sessionName string, roleConfig *beads.Rol
 
 // applySessionTheme applies tmux theming to the session.
 func (d *Daemon) applySessionTheme(sessionName string, parsed *ParsedIdentity) {
-	if parsed.RoleType == "mayor" {
-		theme := tmux.MayorTheme()
-		_ = d.tmux.ConfigureGasTownSession(sessionName, theme, "", "Mayor", "coordinator")
-	} else if parsed.RigName != "" {
-		theme := tmux.AssignTheme(parsed.RigName)
-		_ = d.tmux.ConfigureGasTownSession(sessionName, theme, parsed.RigName, parsed.RoleType, parsed.RoleType)
+	rigName := parsed.RigName
+	role := parsed.RoleType
+	worker := parsed.RoleType
+	if role == constants.RoleMayor {
+		rigName = ""
+		worker = "Mayor"
 	}
+	theme := tmux.ResolveSessionTheme(d.config.TownRoot, rigName, role, parsed.AgentName)
+	_ = d.tmux.ConfigureGasTownSession(sessionName, theme, rigName, worker, role)
 }
 
 // syncFailureEscalationThreshold is the default number of consecutive pull failures
@@ -588,6 +644,7 @@ func (d *Daemon) syncWorkspace(workDir string) {
 	fetchCmd.Dir = workDir
 	fetchCmd.Stderr = &stderr
 	fetchCmd.Env = os.Environ() // Inherit PATH to find git executable
+	util.SetDetachedProcessGroup(fetchCmd)
 	if err := fetchCmd.Run(); err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
@@ -610,6 +667,7 @@ func (d *Daemon) syncWorkspace(workDir string) {
 		stashCmd.Dir = workDir
 		stashCmd.Stderr = &stderr
 		stashCmd.Env = os.Environ()
+		util.SetDetachedProcessGroup(stashCmd)
 		if err := stashCmd.Run(); err != nil {
 			errMsg := strings.TrimSpace(stderr.String())
 			if errMsg == "" {
@@ -628,6 +686,7 @@ func (d *Daemon) syncWorkspace(workDir string) {
 	pullCmd.Dir = workDir
 	pullCmd.Stderr = &stderr
 	pullCmd.Env = os.Environ() // Inherit PATH to find git executable
+	util.SetDetachedProcessGroup(pullCmd)
 	if err := pullCmd.Run(); err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
@@ -653,6 +712,7 @@ func (d *Daemon) syncWorkspace(workDir string) {
 		popCmd.Dir = workDir
 		popCmd.Stderr = &stderr
 		popCmd.Env = os.Environ()
+		util.SetDetachedProcessGroup(popCmd)
 		if err := popCmd.Run(); err != nil {
 			errMsg := strings.TrimSpace(stderr.String())
 			if errMsg == "" {
@@ -671,6 +731,7 @@ func (d *Daemon) isWorkingTreeDirty(workDir string) bool {
 	cmd := exec.Command("git", "status", "--porcelain")
 	cmd.Dir = workDir
 	cmd.Env = os.Environ()
+	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		// If we can't check, assume dirty to be safe
@@ -711,6 +772,7 @@ func (d *Daemon) closeMessage(id string) error {
 	cmd := exec.Command(d.gtPath, "mail", "delete", id)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = os.Environ() // Inherit PATH to find gt executable
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -724,7 +786,7 @@ func (d *Daemon) closeMessage(id string) error {
 type AgentBeadInfo struct {
 	ID         string `json:"id"`
 	Type       string `json:"issue_type"`
-	State      string // From DB column (agent_state), fallback to description
+	State      string // From description agent_state, fallback to legacy DB column
 	HookBead   string // From DB column (hook_bead)
 	RoleType   string // Parsed from description: role_type
 	Rig        string // Parsed from description: rig
@@ -749,6 +811,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 	cmd := exec.Command(d.bdPath, "show", agentBeadID, "--json")
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = os.Environ() // Inherit PATH to find bd executable
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -775,15 +838,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 	}
 
 	issue := issues[0]
-	// Check for agent type via gt:agent label (preferred) or legacy type field
-	isAgent := issue.Type == "agent"
-	for _, l := range issue.Labels {
-		if l == "gt:agent" {
-			isAgent = true
-			break
-		}
-	}
-	if !isAgent {
+	if !beads.IsAgentBead(&beads.Issue{Type: issue.Type, Labels: issue.Labels}) {
 		return nil, fmt.Errorf("bead %s is not an agent bead (type=%s)", agentBeadID, issue.Type)
 	}
 
@@ -801,15 +856,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 		info.Rig = fields.Rig
 	}
 
-	// Use AgentState from database column directly (not from description).
-	// UpdateAgentState updates the DB column but not the description text,
-	// so the description can contain stale state (e.g., "spawning" after
-	// the polecat has transitioned to "working"). Fall back to description
-	// only if the DB column is empty (legacy beads).
-	info.State = issue.AgentState
-	if info.State == "" && fields != nil {
-		info.State = fields.AgentState
-	}
+	info.State = beads.ResolveAgentState(issue.Description, issue.AgentState)
 
 	// Use HookBead from database column directly (not from description)
 	// The description may contain stale data - the slot is the source of truth.
@@ -825,6 +872,7 @@ func (d *Daemon) getAgentHookBead(agentBeadID string) string {
 	cmd := exec.Command(d.bdPath, "show", agentBeadID, "--json")
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = os.Environ()
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -849,20 +897,20 @@ func (d *Daemon) identityToAgentBeadID(identity string) string {
 	}
 
 	switch parsed.RoleType {
-	case "deacon":
+	case constants.RoleDeacon:
 		return beads.DeaconBeadIDTown()
-	case "mayor":
+	case constants.RoleMayor:
 		return beads.MayorBeadIDTown()
-	case "witness":
+	case constants.RoleWitness:
 		prefix := config.GetRigPrefix(d.config.TownRoot, parsed.RigName)
 		return beads.WitnessBeadIDWithPrefix(prefix, parsed.RigName)
-	case "refinery":
+	case constants.RoleRefinery:
 		prefix := config.GetRigPrefix(d.config.TownRoot, parsed.RigName)
 		return beads.RefineryBeadIDWithPrefix(prefix, parsed.RigName)
-	case "crew":
+	case constants.RoleCrew:
 		prefix := config.GetRigPrefix(d.config.TownRoot, parsed.RigName)
 		return beads.CrewBeadIDWithPrefix(prefix, parsed.RigName, parsed.AgentName)
-	case "polecat":
+	case constants.RolePolecat:
 		prefix := config.GetRigPrefix(d.config.TownRoot, parsed.RigName)
 		return beads.PolecatBeadIDWithPrefix(prefix, parsed.RigName, parsed.AgentName)
 	default:
@@ -889,15 +937,15 @@ func identityToBDActor(identity string) string {
 	}
 
 	switch parsed.RoleType {
-	case "mayor", "deacon":
+	case constants.RoleMayor, constants.RoleDeacon:
 		return parsed.RoleType
-	case "witness":
+	case constants.RoleWitness:
 		return parsed.RigName + "/witness"
-	case "refinery":
+	case constants.RoleRefinery:
 		return parsed.RigName + "/refinery"
-	case "crew":
+	case constants.RoleCrew:
 		return parsed.RigName + "/crew/" + parsed.AgentName
-	case "polecat":
+	case constants.RolePolecat:
 		return parsed.RigName + "/polecats/" + parsed.AgentName
 	default:
 		return identity
@@ -913,9 +961,10 @@ const GUPPViolationTimeout = constants.GUPPViolationTimeout
 // The wisps query is best-effort (gracefully ignored if table doesn't exist).
 func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
 	// Query issues table (backward compat during migration)
-	cmd := exec.Command(d.bdPath, "list", "--label=gt:agent", "--json") //nolint:gosec // G204: bd is a trusted internal tool
+	cmd := exec.Command(d.bdPath, "list", "--label=gt:agent", "--json", "--flat") //nolint:gosec // G204: bd is a trusted internal tool
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = os.Environ()
+	util.SetDetachedProcessGroup(cmd)
 
 	issuesOutput, issuesErr := cmd.Output()
 
@@ -923,6 +972,7 @@ func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
 	wispCmd := exec.Command(d.bdPath, "mol", "wisp", "list", "--json") //nolint:gosec // G204: bd is a trusted internal tool
 	wispCmd.Dir = d.config.TownRoot
 	wispCmd.Env = os.Environ()
+	util.SetDetachedProcessGroup(wispCmd)
 
 	wispOutput, _ := wispCmd.Output() // Best-effort: wisps table may not exist
 
@@ -991,8 +1041,21 @@ func mergeAgentBeadJSON(wispJSON, issuesJSON []byte) []byte {
 // progressing. This is a GUPP violation: agents with hooked work must execute.
 // The daemon detects these and notifies the relevant Witness for remediation.
 func (d *Daemon) checkGUPPViolations() {
-	// Check polecat agents - they're the ones with work-on-hook
+	// Check if any rigs are operational before querying agent beads
 	rigs := d.getKnownRigs()
+	hasOperationalRig := false
+	for _, rigName := range rigs {
+		if operational, _ := d.isRigOperational(rigName); operational {
+			hasOperationalRig = true
+			break
+		}
+	}
+
+	// Skip entirely if no rigs are operational (all docked/parked)
+	if !hasOperationalRig {
+		return
+	}
+
 	for _, rigName := range rigs {
 		d.checkRigGUPPViolations(rigName)
 	}
@@ -1013,6 +1076,7 @@ func (d *Daemon) checkRigGUPPViolations(rigName string) {
 	}
 
 	if err := d.listAgentBeadsJSON(&agents); err != nil {
+		// Suppress warning when there are simply no agent beads (expected when all rigs are docked)
 		d.logger.Printf("Warning: listing agent beads failed for GUPP check: %v", err)
 		return
 	}
@@ -1031,6 +1095,14 @@ func (d *Daemon) checkRigGUPPViolations(rigName string) {
 		// Use HookBead from database column directly (not parsed from description)
 		if agent.HookBead == "" {
 			continue // No hooked work - no GUPP violation possible
+		}
+
+		agentState := beads.ResolveAgentState(agent.Description, agent.AgentState)
+
+		// Skip nuked agents — they're intentionally terminated and should not
+		// trigger alerts even if stale hook_bead data remains in the database.
+		if beads.AgentState(agentState) == beads.AgentStateNuked {
+			continue
 		}
 
 		// Per gt-zecmc: derive running state from tmux, not agent_state
@@ -1073,6 +1145,7 @@ Action needed: Check if agent is alive and responsive. Consider restarting if st
 	cmd := exec.Command(d.gtPath, "mail", "send", witnessAddr, "-s", subject, "-m", body)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = os.Environ() // Inherit PATH to find gt executable
+	util.SetDetachedProcessGroup(cmd)
 
 	if err := cmd.Run(); err != nil {
 		d.logger.Printf("Warning: failed to notify witness of GUPP violation: %v", err)
@@ -1085,8 +1158,21 @@ Action needed: Check if agent is alive and responsive. Consider restarting if st
 // Orphaned work needs to be reassigned or the agent needs to be restarted.
 // Per gt-zecmc: derive agent liveness from tmux, not agent_state.
 func (d *Daemon) checkOrphanedWork() {
-	// Check all polecat agents with hooked work
+	// Check if any rigs are operational before querying agent beads
 	rigs := d.getKnownRigs()
+	hasOperationalRig := false
+	for _, rigName := range rigs {
+		if operational, _ := d.isRigOperational(rigName); operational {
+			hasOperationalRig = true
+			break
+		}
+	}
+
+	// Skip entirely if no rigs are operational (all docked/parked)
+	if !hasOperationalRig {
+		return
+	}
+
 	for _, rigName := range rigs {
 		d.checkRigOrphanedWork(rigName)
 	}
@@ -1096,10 +1182,12 @@ func (d *Daemon) checkOrphanedWork() {
 func (d *Daemon) checkRigOrphanedWork(rigName string) {
 	// List polecat agent beads (issues + wisps tables)
 	var agents []struct {
-		ID       string   `json:"id"`
-		HookBead string   `json:"hook_bead"`
-		Labels   []string `json:"labels"`
-		Type     string   `json:"issue_type"`
+		ID          string   `json:"id"`
+		HookBead    string   `json:"hook_bead"`
+		AgentState  string   `json:"agent_state"`
+		Description string   `json:"description"`
+		Labels      []string `json:"labels"`
+		Type        string   `json:"issue_type"`
 	}
 
 	if err := d.listAgentBeadsJSON(&agents); err != nil {
@@ -1119,6 +1207,14 @@ func (d *Daemon) checkRigOrphanedWork(rigName string) {
 
 		// No hooked work = nothing to orphan
 		if agent.HookBead == "" {
+			continue
+		}
+
+		agentState := beads.ResolveAgentState(agent.Description, agent.AgentState)
+
+		// Skip nuked agents — they're intentionally terminated and should not
+		// trigger alerts even if stale hook_bead data remains in the database.
+		if beads.AgentState(agentState) == beads.AgentStateNuked {
 			continue
 		}
 
@@ -1156,7 +1252,7 @@ func (d *Daemon) extractRigFromAgentID(agentID string) string {
 	// Use the beads package helper to correctly parse agent bead IDs.
 	// Pattern: <prefix>-<rig>-polecat-<name> (e.g., gt-gastown-polecat-Toast)
 	rig, role, _, ok := beads.ParseAgentBeadID(agentID)
-	if !ok || role != "polecat" {
+	if !ok || role != constants.RolePolecat {
 		return ""
 	}
 	return rig
@@ -1176,6 +1272,7 @@ Action needed: Either restart the agent or reassign the work.`,
 	cmd := exec.Command(d.gtPath, "mail", "send", witnessAddr, "-s", subject, "-m", body)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = os.Environ() // Inherit PATH to find gt executable
+	util.SetDetachedProcessGroup(cmd)
 
 	if err := cmd.Run(); err != nil {
 		d.logger.Printf("Warning: failed to notify witness of orphaned work: %v", err)

@@ -4,22 +4,37 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/reaper"
 )
+
+// shortHash returns at most 8 characters of a hash for display.
+func shortHash(hash string) string {
+	if len(hash) > 8 {
+		return hash[:8]
+	}
+	return hash
+}
 
 const (
 	defaultCompactorDogInterval = 24 * time.Hour
 	// defaultCompactorCommitThreshold is the minimum commit count before compaction triggers.
-	// 500 commits is a reasonable daily threshold — prevents unbounded growth
-	// without compacting too aggressively. Configurable via daemon.json.
-	defaultCompactorCommitThreshold = 500
+	// 2000 commits prevents the escalation feedback loop where each compaction
+	// failure creates beads/escalations that add more commits than the compactor
+	// can drain at 500. Configurable via daemon.json.
+	defaultCompactorCommitThreshold = 2000
 	// compactorQueryTimeout is the timeout for individual SQL queries during compaction.
 	compactorQueryTimeout = 30 * time.Second
 	// compactorGCTimeout is the timeout for CALL dolt_gc() after compaction.
 	compactorGCTimeout = 5 * time.Minute
+	// compactorPushTimeout is the timeout for DOLT_PUSH after compaction.
+	compactorPushTimeout = 2 * time.Minute
 	// compactorBranchName is the temporary branch used during compaction.
 	compactorBranchName = "gt-compaction"
 	// surgicalMaxRetries is the number of times to retry surgical rebase after
@@ -34,7 +49,7 @@ type CompactorDogConfig struct {
 	Enabled     bool     `json:"enabled"`
 	IntervalStr string   `json:"interval,omitempty"`
 	// Threshold is the minimum commit count before compaction triggers.
-	// Defaults to 500 if not set.
+	// Defaults to 2000 if not set.
 	Threshold int `json:"threshold,omitempty"`
 	// Databases lists specific database names to compact.
 	// If empty, falls back to wisp_reaper config, then auto-discovery.
@@ -91,22 +106,26 @@ func compactorDogKeepRecent(config *DaemonPatrolConfig) int {
 	return 50
 }
 
-// runCompactorDog checks each production database's commit count and
-// flattens any that exceed the threshold. The flatten algorithm:
-//  1. Record main HEAD hash and row counts (pre-flight)
-//  2. Create temp branch gt-compaction from main
-//  3. Soft-reset to root commit (keeps all data staged)
-//  4. Commit all data as single commit
-//  5. Verify row counts match (integrity check)
-//  6. Move main to the new single commit
-//  7. Delete temp branch
+// runCompactorDog checks each production database's commit count and compacts
+// any that exceed the threshold. Two modes:
+//
+// Flatten mode (default): soft-resets to root commit on main, commits all data
+// as a single commit. Safe with concurrent writes.
+//
+// Surgical mode: interactive rebase that squashes old commits while preserving
+// recent N as individual picks. NOT safe with concurrent writes — retries once.
 //
 // After successful compaction, runs dolt gc to reclaim unreferenced chunks.
-// Order matters: rebase first (compaction), gc second.
 //
-// Concurrency safety: if main HEAD moves during compaction, abort.
+// ZFC Exemption: This dog executes imperatively in Go rather than via agent-driven
+// formula execution. The mol-dog-compactor formula is used for observability
+// tracking only (pourDogMolecule + closeStep/failStep). Agent execution is
+// impractical because: (1) operations require database/sql connections, (2)
+// transactional state spans multiple queries, (3) cleanup-on-failure error paths,
+// (4) concurrent write retry with error classification, (5) row count integrity
+// verification. See mol-dog-compactor.formula.toml for full rationale.
 func (d *Daemon) runCompactorDog() {
-	if !IsPatrolEnabled(d.patrolConfig, "compactor_dog") {
+	if !d.isPatrolActive("compactor_dog") {
 		return
 	}
 
@@ -117,7 +136,7 @@ func (d *Daemon) runCompactorDog() {
 		d.logger.Printf("compactor_dog: WARNING: surgical mode uses DOLT_REBASE which is not safe with concurrent writes — will retry on graph-change errors")
 	}
 
-	mol := d.pourDogMolecule("mol-dog-compactor", nil)
+	mol := d.pourDogMolecule(constants.MolDogCompactor, nil)
 	defer mol.close()
 
 	databases := d.compactorDatabases()
@@ -151,6 +170,22 @@ func (d *Daemon) runCompactorDog() {
 		d.logger.Printf("compactor_dog: %s: %d commits (threshold %d) — compacting (mode=%s)",
 			dbName, commitCount, threshold, mode)
 
+		// Pre-flight: fetch from remote and verify local ≥ remote before
+		// compacting. Flatten rewrites the commit graph, so force-push after
+		// compaction would overwrite any remote-only commits. Skip compaction
+		// if the remote has diverged.
+		diverged, fetchErr := d.compactorFetchAndVerify(dbName)
+		if fetchErr != nil {
+			d.logger.Printf("compactor_dog: %s: pre-flight fetch failed: %v (skipping)", dbName, fetchErr)
+			skipped++
+			continue
+		}
+		if diverged {
+			d.logger.Printf("compactor_dog: %s: remote has diverged — skipping compaction to avoid data loss", dbName)
+			skipped++
+			continue
+		}
+
 		var compactErr error
 		if mode == "surgical" {
 			keepRecent := compactorDogKeepRecent(d.patrolConfig)
@@ -168,6 +203,13 @@ func (d *Daemon) runCompactorDog() {
 			// Order matters: rebase first (compactDatabase), gc second.
 			if err := d.compactorRunGC(dbName); err != nil {
 				d.logger.Printf("compactor_dog: %s: gc after compaction failed: %v", dbName, err)
+			}
+			// Force-push to DoltHub remote after compaction. Flatten rewrites
+			// the commit graph, so standard push always fails with non-fast-forward.
+			// Safe because compactorFetchAndVerify confirmed local ≥ remote
+			// before compaction, and compactDatabase verified integrity.
+			if err := d.compactorForcePush(dbName); err != nil {
+				d.logger.Printf("compactor_dog: %s: force-push failed: %v", dbName, err)
 			}
 		}
 	}
@@ -200,7 +242,7 @@ func (d *Daemon) compactorDatabases() []string {
 			}
 		}
 	}
-	return d.discoverDoltDatabases()
+	return reaper.DefaultDatabases
 }
 
 // compactorCountCommits counts the number of commits in the database's dolt_log.
@@ -246,7 +288,7 @@ func (d *Daemon) compactDatabase(dbName string) error {
 	if err != nil {
 		return fmt.Errorf("find root commit: %w", err)
 	}
-	d.logger.Printf("compactor_dog: %s: root commit=%s", dbName, rootHash[:8])
+	d.logger.Printf("compactor_dog: %s: root commit=%s", dbName, shortHash(rootHash))
 
 	// Step 3: USE database for session-scoped operations.
 	ctx, cancel := context.WithTimeout(context.Background(), compactorQueryTimeout)
@@ -260,7 +302,7 @@ func (d *Daemon) compactDatabase(dbName string) error {
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_RESET('--soft', '%s')", rootHash)); err != nil {
 		return fmt.Errorf("soft reset to root: %w", err)
 	}
-	d.logger.Printf("compactor_dog: %s: soft-reset to root %s", dbName, rootHash[:8])
+	d.logger.Printf("compactor_dog: %s: soft-reset to root %s", dbName, shortHash(rootHash))
 
 	// Step 5: Commit all data as a single commit.
 	commitMsg := fmt.Sprintf("compaction: flatten %s history to single commit", dbName)
@@ -269,7 +311,9 @@ func (d *Daemon) compactDatabase(dbName string) error {
 	}
 	d.logger.Printf("compactor_dog: %s: committed flattened data", dbName)
 
-	// Step 6: Verify integrity — row counts must match pre-flight.
+	// Step 6: Verify integrity — row counts must not decrease (data loss).
+	// Concurrent writes may increase counts during compaction — this is safe
+	// since the flattened commit includes those rows.
 	postCounts, err := d.compactorGetRowCounts(db, dbName)
 	if err != nil {
 		return fmt.Errorf("post-compact row counts: %w", err)
@@ -280,8 +324,12 @@ func (d *Daemon) compactDatabase(dbName string) error {
 		if !ok {
 			return fmt.Errorf("integrity check: table %q missing after compaction", table)
 		}
-		if preCount != postCount {
-			return fmt.Errorf("integrity check: table %q count mismatch: pre=%d post=%d", table, preCount, postCount)
+		if postCount < preCount {
+			return fmt.Errorf("integrity check: table %q lost rows: pre=%d post=%d", table, preCount, postCount)
+		}
+		if postCount > preCount {
+			d.logger.Printf("compactor_dog: %s: table %q gained %d rows during compaction (concurrent write, safe)",
+				dbName, table, postCount-preCount)
 		}
 	}
 	d.logger.Printf("compactor_dog: %s: integrity verified (%d tables match)", dbName, len(preCounts))
@@ -363,7 +411,7 @@ func (d *Daemon) surgicalRebaseOnce(dbName string, keepRecent int) error {
 		return fmt.Errorf("pre-flight row counts: %w", err)
 	}
 	d.logger.Printf("compactor_dog: %s: surgical rebase pre-flight HEAD=%s, tables=%d, keep_recent=%d",
-		dbName, preHead[:8], len(preCounts), keepRecent)
+		dbName, shortHash(preHead), len(preCounts), keepRecent)
 
 	rootHash, err := d.compactorGetRootCommit(db, dbName)
 	if err != nil {
@@ -406,10 +454,17 @@ func (d *Daemon) surgicalRebaseOnce(dbName string, keepRecent int) error {
 	d.logger.Printf("compactor_dog: %s: interactive rebase started", dbName)
 
 	// Step 4: Read rebase plan bounds and mark old commits as squash.
-	var minOrder, maxOrder int
-	if err := db.QueryRowContext(ctx, "SELECT MIN(rebase_order), MAX(rebase_order) FROM dolt_rebase").Scan(&minOrder, &maxOrder); err != nil {
+	// Dolt returns rebase_order as DECIMAL — the MySQL driver delivers it as
+	// []uint8 (e.g. "1.00") which cannot be scanned directly into int.
+	var minOrderStr, maxOrderStr string
+	if err := db.QueryRowContext(ctx, "SELECT MIN(rebase_order), MAX(rebase_order) FROM dolt_rebase").Scan(&minOrderStr, &maxOrderStr); err != nil {
 		d.surgicalAbortAndCleanup(db, baseBranch, workBranch)
 		return fmt.Errorf("read rebase bounds: %w", err)
+	}
+	minOrder, maxOrder, err := parseRebaseOrder2(minOrderStr, maxOrderStr)
+	if err != nil {
+		d.surgicalAbortAndCleanup(db, baseBranch, workBranch)
+		return fmt.Errorf("parse rebase bounds: %w", err)
 	}
 
 	squashThreshold := maxOrder - keepRecent
@@ -436,7 +491,8 @@ func (d *Daemon) surgicalRebaseOnce(dbName string, keepRecent int) error {
 	}
 	d.logger.Printf("compactor_dog: %s: rebase executed successfully", dbName)
 
-	// Step 6: Verify integrity.
+	// Step 6: Verify integrity — row counts must not decrease (data loss).
+	// Concurrent writes may increase counts during rebase — this is safe.
 	postCounts, err := d.compactorGetRowCounts(db, dbName)
 	if err != nil {
 		d.logger.Printf("compactor_dog: %s: WARNING: could not verify row counts after rebase: %v", dbName, err)
@@ -447,9 +503,13 @@ func (d *Daemon) surgicalRebaseOnce(dbName string, keepRecent int) error {
 				d.surgicalCleanup(db, baseBranch, workBranch)
 				return fmt.Errorf("integrity: table %q missing after rebase", table)
 			}
-			if preCount != postCount {
+			if postCount < preCount {
 				d.surgicalCleanup(db, baseBranch, workBranch)
-				return fmt.Errorf("integrity: table %q count mismatch: pre=%d post=%d", table, preCount, postCount)
+				return fmt.Errorf("integrity: table %q lost rows: pre=%d post=%d", table, preCount, postCount)
+			}
+			if postCount > preCount {
+				d.logger.Printf("compactor_dog: %s: table %q gained %d rows during rebase (concurrent write, safe)",
+					dbName, table, postCount-preCount)
 			}
 		}
 		d.logger.Printf("compactor_dog: %s: integrity verified (%d tables)", dbName, len(preCounts))
@@ -463,7 +523,7 @@ func (d *Daemon) surgicalRebaseOnce(dbName string, keepRecent int) error {
 	}
 	if currentHead != preHead {
 		d.surgicalCleanup(db, baseBranch, workBranch)
-		return fmt.Errorf("concurrency abort: main HEAD moved from %s to %s", preHead[:8], currentHead[:8])
+		return fmt.Errorf("concurrency abort: main HEAD moved from %s to %s", shortHash(preHead), shortHash(currentHead))
 	}
 
 	// Step 8: Swap branches — make compact-work the new main.
@@ -494,13 +554,28 @@ func (d *Daemon) surgicalCleanup(db *sql.DB, baseBranch, workBranch string) {
 }
 
 // surgicalAbortAndCleanup aborts an in-progress rebase, then cleans up.
-func (d *Daemon) surgicalAbortAndCleanup(db *sql.DB, baseBranch, workBranch string) {
+func (d *Daemon) surgicalAbortAndCleanup(db *sql.DB, baseBranch, workBranch string) { //nolint:unparam // baseBranch is always "compact-base" but kept for API symmetry with surgicalCleanup
 	ctx, cancel := context.WithTimeout(context.Background(), compactorQueryTimeout)
 	defer cancel()
 	_, _ = db.ExecContext(ctx, "CALL DOLT_REBASE('--abort')")
 	_, _ = db.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')")
 	_, _ = db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_BRANCH('-D', '%s')", workBranch))
 	_, _ = db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_BRANCH('-D', '%s')", baseBranch))
+}
+
+// parseRebaseOrder2 parses min/max rebase_order DECIMAL strings to ints.
+// Dolt's dolt_rebase table returns rebase_order as DECIMAL which the MySQL
+// driver delivers as []uint8 (e.g. "1.00"), not directly scannable to int.
+func parseRebaseOrder2(minStr, maxStr string) (int, int, error) {
+	minF, err := strconv.ParseFloat(minStr, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid min rebase_order %q: %w", minStr, err)
+	}
+	maxF, err := strconv.ParseFloat(maxStr, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid max rebase_order %q: %w", maxStr, err)
+	}
+	return int(math.Round(minF)), int(math.Round(maxF)), nil
 }
 
 // surgicalCleanupBase removes only the base branch (work branch not yet created).
@@ -622,5 +697,97 @@ func (d *Daemon) compactorRunGC(dbName string) error {
 	}
 
 	d.logger.Printf("compactor_dog: gc: %s: completed in %v", dbName, time.Since(start))
+	return nil
+}
+
+// compactorFetchAndVerify fetches from the remote and checks that the local
+// history contains the remote HEAD. Returns (diverged=true, nil) if the remote
+// has commits not in local history — compaction must be skipped to avoid data
+// loss on force-push. Returns (false, nil) if local ≥ remote or no remote.
+// Mirrors the shell script's pre-flight check (run.sh lines 263-300).
+func (d *Daemon) compactorFetchAndVerify(dbName string) (diverged bool, err error) {
+	db, err := d.compactorOpenDB(dbName)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), compactorQueryTimeout)
+	defer cancel()
+
+	// Discover remote.
+	var remoteName string
+	if err := db.QueryRowContext(ctx, "SELECT name FROM dolt_remotes LIMIT 1").Scan(&remoteName); err != nil {
+		return false, nil // No remote — nothing to verify
+	}
+
+	// Fetch from remote.
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), compactorPushTimeout)
+	defer fetchCancel()
+	if _, err := db.ExecContext(fetchCtx, "CALL DOLT_FETCH(?)", remoteName); err != nil {
+		return false, fmt.Errorf("DOLT_FETCH %s: %w", remoteName, err)
+	}
+
+	// Get remote HEAD.
+	var remoteHead string
+	remoteRef := remoteName + "/main"
+	err = db.QueryRowContext(ctx,
+		"SELECT commit_hash FROM dolt_remote_branches WHERE name = ?", remoteRef,
+	).Scan(&remoteHead)
+	if err != nil {
+		return false, nil // Remote ref not found — skip check
+	}
+
+	// Check if remote HEAD is an ancestor of local history.
+	var isAncestor int
+	err = db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", remoteHead,
+	).Scan(&isAncestor)
+	if err != nil {
+		return false, fmt.Errorf("ancestor check: %w", err)
+	}
+
+	if isAncestor == 0 {
+		return true, nil // Diverged — remote has commits we don't have
+	}
+
+	d.logger.Printf("compactor_dog: fetch: %s: local ≥ %s (verified)", dbName, remoteName)
+	return false, nil
+}
+
+// compactorForcePush pushes the compacted database to its DoltHub remote.
+// Flatten rewrites the commit graph, so a force-push is required — standard
+// push always fails with non-fast-forward. This mirrors the shell script's
+// DOLT_PUSH('--force', remote) at line 397 of plugins/compactor-dog/run.sh.
+// Non-fatal: remote may not be configured, and push failures don't affect
+// local data integrity.
+func (d *Daemon) compactorForcePush(dbName string) error {
+	db, err := d.compactorOpenDB(dbName)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Discover the remote name (if any).
+	ctx, cancel := context.WithTimeout(context.Background(), compactorQueryTimeout)
+	defer cancel()
+
+	var remoteName string
+	err = db.QueryRowContext(ctx, "SELECT name FROM dolt_remotes LIMIT 1").Scan(&remoteName)
+	if err != nil || remoteName == "" {
+		return nil // No remote configured — skip silently
+	}
+
+	// Force-push to remote.
+	pushCtx, pushCancel := context.WithTimeout(context.Background(), compactorPushTimeout)
+	defer pushCancel()
+
+	start := time.Now()
+	_, err = db.ExecContext(pushCtx, "CALL DOLT_PUSH('--force', ?)", remoteName)
+	if err != nil {
+		return fmt.Errorf("DOLT_PUSH --force to %s: %w", remoteName, err)
+	}
+
+	d.logger.Printf("compactor_dog: push: %s → %s: force-pushed in %v", dbName, remoteName, time.Since(start))
 	return nil
 }

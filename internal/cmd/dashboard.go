@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"time"
 
 	"golang.org/x/term"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/web"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -44,7 +46,11 @@ Example:
 
 func init() {
 	dashboardCmd.Flags().IntVar(&dashboardPort, "port", 8080, "HTTP port to listen on")
-	dashboardCmd.Flags().StringVar(&dashboardBind, "bind", "127.0.0.1", "Address to bind to (use 0.0.0.0 for all interfaces)")
+	defaultBind := "127.0.0.1"
+	if os.Getenv("IS_SANDBOX") != "" {
+		defaultBind = "0.0.0.0"
+	}
+	dashboardCmd.Flags().StringVar(&dashboardBind, "bind", defaultBind, "Address to bind to (use 0.0.0.0 for all interfaces)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open browser automatically")
 	rootCmd.AddCommand(dashboardCmd)
 }
@@ -63,6 +69,12 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		// In a workspace - run normal dashboard
+
+		// Set BEADS_DOLT_PORT and GT_DOLT_PORT so bd/gt subprocesses connect
+		// to the actual Dolt SQL server, not the dashboard's HTTP listen port.
+		// Without this, inherited env vars could point bd at the wrong port.
+		ensureDoltPortEnv(townRoot)
+
 		fetcher, fetchErr := web.NewLiveConvoyFetcher()
 		if fetchErr != nil {
 			return fmt.Errorf("creating convoy fetcher: %w", fetchErr)
@@ -139,6 +151,29 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 		IdleTimeout:       120 * time.Second,
 	}
 	return server.ListenAndServe()
+}
+
+// ensureDoltPortEnv sets GT_DOLT_PORT, BEADS_DOLT_PORT, and BEADS_DOLT_SERVER_HOST
+// to the actual Dolt server connection info. This prevents bd subprocesses from
+// inheriting stale or incorrect values from the environment.
+// Reads the running state from daemon/dolt-state.json; falls back to
+// doltserver.DefaultConfig; otherwise uses the Dolt defaults.
+func ensureDoltPortEnv(townRoot string) {
+	var port int
+	if state, err := doltserver.LoadState(townRoot); err == nil && state.Port > 0 {
+		port = state.Port
+	} else {
+		port = doltserver.DefaultPort
+	}
+	portStr := strconv.Itoa(port)
+	os.Setenv("GT_DOLT_PORT", portStr)
+	os.Setenv("BEADS_DOLT_PORT", portStr)
+
+	// Propagate host so bd doesn't fall back to 127.0.0.1.
+	doltCfg := doltserver.DefaultConfig(townRoot)
+	if doltCfg.Host != "" {
+		os.Setenv("BEADS_DOLT_SERVER_HOST", doltCfg.Host)
+	}
 }
 
 // openBrowser opens the specified URL in the default browser.

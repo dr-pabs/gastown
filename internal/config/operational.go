@@ -18,8 +18,8 @@ const (
 	DefaultBdSubprocessTimeout     = 5 * time.Second
 	DefaultGUPPViolationTimeout    = 30 * time.Minute
 	DefaultHungSessionThreshold    = 30 * time.Minute
-	DefaultStartupNudgeVerifyDelay = 5 * time.Second
-	DefaultStartupNudgeMaxRetries  = 3
+	DefaultStartupNudgeVerifyDelay = 25 * time.Second
+	DefaultStartupNudgeMaxRetries  = 2
 )
 
 // Nudge defaults.
@@ -38,12 +38,23 @@ const (
 	DefaultMassDeathWindow                 = 30 * time.Second
 	DefaultMassDeathThreshold              = 3
 	DefaultDogIdleSessionTimeout           = 1 * time.Hour
+	DefaultPolecatIdleSessionTimeout       = 15 * time.Minute
 	DefaultDogIdleRemoveTimeout            = 4 * time.Hour
 	DefaultStaleWorkingTimeout             = 2 * time.Hour
 	DefaultMaxDogPoolSize                  = 4
 	DefaultMaxLifecycleMessageAge          = 6 * time.Hour
 	DefaultSyncFailureEscalationThreshold  = 3
 	DefaultDoctorMolCooldown               = 5 * time.Minute
+	DefaultRecoveryHeartbeatInterval       = 3 * time.Minute
+	DefaultBootSpawnCooldown               = 2 * time.Minute
+	DefaultDeaconGracePeriod               = 5 * time.Minute
+
+	// Pressure check defaults — fully opt-in. All zero = disabled.
+	// Configure in settings/config.json under operational.daemon to enable.
+	// Example: {"pressure_cpu_threshold": 3.0, "pressure_mem_threshold_gb": 0.5}
+	DefaultPressureCPUThreshold   = 0.0
+	DefaultPressureMemThresholdGB = 0.0
+	DefaultPressureMaxSessions    = 0
 )
 
 // Deacon defaults.
@@ -52,7 +63,7 @@ const (
 	DefaultDeaconConsecutiveFailures       = 3
 	DefaultDeaconCooldown                  = 5 * time.Minute
 	DefaultDeaconHeartbeatStaleThreshold   = 5 * time.Minute
-	DefaultDeaconHeartbeatVeryStale        = 15 * time.Minute
+	DefaultDeaconHeartbeatVeryStale        = 20 * time.Minute
 	DefaultMaxRedispatches                 = 3
 	DefaultRedispatchCooldown              = 5 * time.Minute
 	DefaultMaxFeedsPerCycle                = 3
@@ -83,6 +94,7 @@ const (
 	DefaultMailBdReadTimeout      = 60 * time.Second
 	DefaultMailBdWriteTimeout     = 60 * time.Second
 	DefaultMailMaxConcurrentAcks  = 8
+	DefaultMailReplyReminderDelay = 30 * time.Second
 )
 
 // Web defaults.
@@ -90,6 +102,15 @@ const (
 	DefaultWebMaxConcurrentCmds = 12
 	DefaultWebMaxSubjectLen     = 500
 	DefaultWebMaxBodyLen        = 100_000
+)
+
+// Witness defaults.
+const (
+	DefaultWitnessStartupStallThreshold  = 90 * time.Second
+	DefaultWitnessStartupActivityGrace   = 60 * time.Second
+	DefaultWitnessMaxBeadRespawns        = 3
+	DefaultWitnessDoneIntentStuckTimeout = 60 * time.Second
+	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -288,6 +309,17 @@ func (d *DaemonThresholds) DogIdleSessionTimeoutD() time.Duration {
 	return DefaultDogIdleSessionTimeout
 }
 
+// PolecatIdleSessionTimeoutD returns the configured or default polecat idle session timeout.
+// Polecats that have been idle (no hooked work, heartbeat state=idle) longer than this
+// threshold are auto-killed to prevent API slot burn. Default 15 minutes — long enough
+// for polecats to run gt done after completing work, short enough to prevent hour-long burns.
+func (d *DaemonThresholds) PolecatIdleSessionTimeoutD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.PolecatIdleSessionTimeout, DefaultPolecatIdleSessionTimeout)
+	}
+	return DefaultPolecatIdleSessionTimeout
+}
+
 // DogIdleRemoveTimeoutD returns the configured or default dog idle remove timeout.
 func (d *DaemonThresholds) DogIdleRemoveTimeoutD() time.Duration {
 	if d != nil {
@@ -334,6 +366,54 @@ func (d *DaemonThresholds) DoctorMolCooldownD() time.Duration {
 		return ParseDurationOrDefault(d.DoctorMolCooldown, DefaultDoctorMolCooldown)
 	}
 	return DefaultDoctorMolCooldown
+}
+
+// RecoveryHeartbeatIntervalD returns the configured or default recovery heartbeat interval.
+func (d *DaemonThresholds) RecoveryHeartbeatIntervalD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.RecoveryHeartbeatInterval, DefaultRecoveryHeartbeatInterval)
+	}
+	return DefaultRecoveryHeartbeatInterval
+}
+
+// BootSpawnCooldownD returns the configured or default boot spawn cooldown.
+func (d *DaemonThresholds) BootSpawnCooldownD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.BootSpawnCooldown, DefaultBootSpawnCooldown)
+	}
+	return DefaultBootSpawnCooldown
+}
+
+// DeaconGracePeriodD returns the configured or default deacon grace period.
+func (d *DaemonThresholds) DeaconGracePeriodD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.DeaconGracePeriod, DefaultDeaconGracePeriod)
+	}
+	return DefaultDeaconGracePeriod
+}
+
+// PressureCPUThresholdV returns the configured or default CPU pressure threshold (load per core).
+func (d *DaemonThresholds) PressureCPUThresholdV() float64 {
+	if d != nil && d.PressureCPUThreshold != nil {
+		return *d.PressureCPUThreshold
+	}
+	return DefaultPressureCPUThreshold
+}
+
+// PressureMemThresholdGBV returns the configured or default memory pressure threshold in GB.
+func (d *DaemonThresholds) PressureMemThresholdGBV() float64 {
+	if d != nil && d.PressureMemThresholdGB != nil {
+		return *d.PressureMemThresholdGB
+	}
+	return DefaultPressureMemThresholdGB
+}
+
+// PressureMaxSessionsV returns the configured or default max concurrent sessions (0 = unlimited).
+func (d *DaemonThresholds) PressureMaxSessionsV() int {
+	if d != nil && d.PressureMaxSessions != nil {
+		return *d.PressureMaxSessions
+	}
+	return DefaultPressureMaxSessions
 }
 
 // --- Deacon accessors ---
@@ -560,6 +640,15 @@ func (m *MailThresholds) MaxConcurrentAckOpsV() int {
 	return DefaultMailMaxConcurrentAcks
 }
 
+// ReplyReminderDelayD returns the configured or default reply reminder delay.
+// A zero duration means reply reminders are disabled.
+func (m *MailThresholds) ReplyReminderDelayD() time.Duration {
+	if m != nil {
+		return ParseDurationOrDefault(m.ReplyReminderDelay, DefaultMailReplyReminderDelay)
+	}
+	return DefaultMailReplyReminderDelay
+}
+
 // --- Web accessors ---
 
 // GetWebConfig returns the web thresholds, never nil.
@@ -592,4 +681,54 @@ func (w *WebThresholds) MaxBodyLenV() int {
 		return *w.MaxBodyLen
 	}
 	return DefaultWebMaxBodyLen
+}
+
+// --- Witness accessors ---
+
+// GetWitnessConfig returns the witness thresholds, never nil.
+func (c *OperationalConfig) GetWitnessConfig() *WitnessThresholds {
+	if c != nil && c.Witness != nil {
+		return c.Witness
+	}
+	return &WitnessThresholds{}
+}
+
+// StartupStallThresholdD returns the configured or default startup stall threshold.
+func (wt *WitnessThresholds) StartupStallThresholdD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.StartupStallThreshold, DefaultWitnessStartupStallThreshold)
+	}
+	return DefaultWitnessStartupStallThreshold
+}
+
+// StartupActivityGraceD returns the configured or default startup activity grace.
+func (wt *WitnessThresholds) StartupActivityGraceD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.StartupActivityGrace, DefaultWitnessStartupActivityGrace)
+	}
+	return DefaultWitnessStartupActivityGrace
+}
+
+// MaxBeadRespawnsV returns the configured or default max bead respawns.
+func (wt *WitnessThresholds) MaxBeadRespawnsV() int {
+	if wt != nil && wt.MaxBeadRespawns != nil {
+		return *wt.MaxBeadRespawns
+	}
+	return DefaultWitnessMaxBeadRespawns
+}
+
+// DoneIntentStuckTimeoutD returns the configured or default done-intent stuck timeout.
+func (wt *WitnessThresholds) DoneIntentStuckTimeoutD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.DoneIntentStuckTimeout, DefaultWitnessDoneIntentStuckTimeout)
+	}
+	return DefaultWitnessDoneIntentStuckTimeout
+}
+
+// DoneIntentRecentGraceD returns the configured or default done-intent recent grace.
+func (wt *WitnessThresholds) DoneIntentRecentGraceD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.DoneIntentRecentGrace, DefaultWitnessDoneIntentRecentGrace)
+	}
+	return DefaultWitnessDoneIntentRecentGrace
 }

@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
 	"github.com/testcontainers/testcontainers-go"
@@ -18,19 +18,9 @@ import (
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
-// Pinned to 1.43.0 because later versions only create root@localhost (not
-// root@%), so connections from Docker NAT fail. The initScriptPath()
-// workaround creates root@% at container init; once Dolt fixes the auth
-// bug upstream, bump this version.
-const DoltDockerImage = "dolthub/dolt-sql-server:1.43.0"
-
-// initScriptPath returns the absolute path to testdata/dolt-init.sql,
-// which creates root@'%' so the testcontainers module can connect
-// from outside the container network namespace.
-func initScriptPath() string {
-	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(thisFile), "testdata", "dolt-init.sql")
-}
+// DOLT_ROOT_HOST=% tells the entrypoint to create root@'%' (available
+// since Dolt 1.46.0), which lets testcontainers connect via TCP.
+const DoltDockerImage = "dolthub/dolt-sql-server:1.83.0"
 
 var (
 	doltCtr      *dolt.DoltContainer
@@ -50,14 +40,45 @@ func isDockerAvailable() bool {
 	return dockerAvail
 }
 
+// isReaperRemovingErr returns true if the error is a transient "removing"
+// status from the testcontainers Ryuk reaper. This happens when a previous
+// test run's reaper container is still being cleaned up by Docker.
+func isReaperRemovingErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unexpected container status") &&
+		strings.Contains(err.Error(), "removing")
+}
+
+// runDoltContainerWithRetry calls dolt.Run, retrying on transient reaper
+// "removing" errors up to 3 times with exponential backoff.
+func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error) {
+	const maxRetries = 3
+	delay := 2 * time.Second
+	var lastErr error
+	for attempt := range maxRetries {
+		ctr, err := dolt.Run(ctx, DoltDockerImage,
+			dolt.WithDatabase("gt_test"),
+			testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
+		)
+		if err == nil {
+			return ctr, nil
+		}
+		lastErr = err
+		if !isReaperRemovingErr(err) {
+			return nil, err
+		}
+		if attempt < maxRetries-1 {
+			time.Sleep(delay)
+			delay *= 2
+		}
+	}
+	return nil, lastErr
+}
+
 // startSharedDoltContainer starts the shared Dolt container and sets
 // GT_DOLT_PORT and BEADS_DOLT_PORT process-wide.
 func startSharedDoltContainer() {
 	ctx := context.Background()
-	ctr, err := dolt.Run(ctx, DoltDockerImage,
-		dolt.WithDatabase("gt_test"),
-		dolt.WithScripts(initScriptPath()),
-	)
+	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
 		doltCtrErr = fmt.Errorf("starting Dolt container: %w", err)
 		return
@@ -86,10 +107,7 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	}
 
 	ctx := context.Background()
-	ctr, err := dolt.Run(ctx, DoltDockerImage,
-		dolt.WithDatabase("gt_test"),
-		dolt.WithScripts(initScriptPath()),
-	)
+	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
 		t.Fatalf("starting Dolt container: %v", err)
 	}

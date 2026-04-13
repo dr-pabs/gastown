@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/formula"
+	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -27,22 +29,29 @@ import (
 )
 
 // resolveBeadDir returns the directory to run bd commands for a given bead ID.
-// Uses prefix-based routing to find the correct rig directory.
-// Falls back to rigs.json prefix mapping, then town root.
+// Uses prefix-based routing (routes.jsonl) to resolve the correct rig's .beads
+// directory and returns its parent as the working directory for bd.
+//
+// Background: beads v0.62 removed built-in multi-rig routing from bd — all bd
+// commands now operate on the local database only. Cross-rig resolution must
+// happen in gt before invoking bd, by setting the correct working directory
+// (and stripping BEADS_DIR). This function reads routes.jsonl from the town-level
+// .beads directory and resolves the bead's prefix to the owning rig.
+//
+// PR #3166 (steveyegge/gastown) will replace bd shell-outs with the Go module
+// Storage API, making this function unnecessary. Until then, this is the
+// routing bridge between gt and the routing-free bd CLI.
 func resolveBeadDir(beadID string) string {
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return "."
 	}
-	prefix := beads.ExtractPrefix(beadID)
-	if rigPath := beads.GetRigPathForPrefix(townRoot, prefix); rigPath != "" {
-		return rigPath
-	}
-	// Fallback: consult rigs.json for prefix-to-rig mapping
-	if rigDir := resolveBeadDirFromRigsJSON(townRoot, prefix); rigDir != "" {
-		return rigDir
-	}
-	return townRoot
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	resolved := beads.ResolveBeadsDirForID(townBeadsDir, beadID)
+	// Return the parent of the .beads directory so bd discovers it naturally.
+	// For town-level beads this returns townRoot; for rig beads it returns
+	// the rig's mayor/rig directory (e.g., gastown/mayor/rig).
+	return filepath.Dir(resolved)
 }
 
 // resolveBeadDirFromRigsJSON looks up the rig directory from rigs.json using prefix.
@@ -113,6 +122,10 @@ func collectExistingMolecules(info *beadInfo) []string {
 	// Check dependency bonds (ground truth - bd mol bond creates these)
 	for _, dep := range info.Dependencies {
 		if strings.Contains(dep.ID, "-wisp-") && !seen[dep.ID] {
+			// Skip molecules already closed/burned — bond is stale
+			if dep.Status == "closed" || dep.Status == "tombstone" {
+				continue
+			}
 			seen[dep.ID] = true
 			molecules = append(molecules, dep.ID)
 		}
@@ -150,8 +163,11 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 
 	// Step 1: Force-close descendant steps before detaching. Uses force variant
 	// since burn is a destructive recovery path where prior state may be inconsistent.
+	// Best-effort — log but proceed in destructive path.
 	for _, molID := range molecules {
-		forceCloseDescendants(bd, molID)
+		if _, err := forceCloseDescendants(bd, molID); err != nil {
+			style.PrintWarning("burn: could not close descendants of %s: %v", molID, err)
+		}
 	}
 
 	// Step 2: Detach molecule from the base bead using the Go API (with audit logging
@@ -182,8 +198,11 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 	}
 
 	// Step 4: Close descendants, then force-close the orphaned wisp roots.
+	// Best-effort — log but proceed in destructive path.
 	for _, molID := range molecules {
-		forceCloseDescendants(bd, molID)
+		if _, err := forceCloseDescendants(bd, molID); err != nil {
+			style.PrintWarning("burn: could not close descendants of %s: %v", molID, err)
+		}
 	}
 	if err := bd.ForceCloseWithReason("burned: force re-sling", molecules...); err != nil {
 		fmt.Printf("  %s Could not close molecule wisp(s): %v\n",
@@ -196,14 +215,13 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 }
 
 // verifyBeadExists checks that the bead exists using bd show.
-// Uses bd's native prefix-based routing via routes.jsonl - do NOT set BEADS_DIR
-// as that overrides routing and breaks resolution of rig-level beads.
-//
-// Checks bead existence using bd show.
 // Resolves the rig directory from the bead's prefix for correct dolt access.
+// StripBeadsDir prevents inherited BEADS_DIR from overriding the resolved
+// directory, which caused rig-prefixed beads to fail (GH#2126).
 func verifyBeadExists(beadID string) error {
 	out, err := BdCmd("show", beadID, "--json", "--allow-stale").
 		Dir(resolveBeadDir(beadID)).
+		StripBeadsDir().
 		Stderr(io.Discard).
 		Output()
 	if err != nil {
@@ -220,6 +238,7 @@ func verifyBeadExists(beadID string) error {
 func getBeadInfo(beadID string) (*beadInfo, error) {
 	out, err := BdCmd("show", beadID, "--json", "--allow-stale").
 		Dir(resolveBeadDir(beadID)).
+		StripBeadsDir().
 		Stderr(io.Discard).
 		Output()
 	if err != nil {
@@ -245,13 +264,16 @@ func getBeadInfo(beadID string) (*beadInfo, error) {
 type beadFieldUpdates struct {
 	Dispatcher       string // Agent that dispatched the work
 	Args             string // Natural language instructions
+	Vars             []string // Formula variables (key=value pairs)
 	AttachedMolecule string // Wisp root ID
 	AttachedFormula  string // Formula name (e.g., "mol-polecat-work") for inline step display
 	NoMerge          bool   // Skip merge queue on completion
+	ReviewOnly       bool   // Review-only mode: assignee must not merge/commit/push
 	Mode             string // Execution mode: "" (normal) or "ralph"
 	ConvoyID         string // Convoy bead ID (e.g., "hq-cv-abc")
 	MergeStrategy    string // Convoy merge strategy: "direct", "mr", "local"
 	ConvoyOwned      bool   // Convoy has gt:owned label (caller-managed lifecycle)
+	FormulaVars      string // Newline-separated key=value pairs for formula template substitution
 }
 
 // storeFieldsInBead performs a single read-modify-write to update all attachment fields
@@ -266,7 +288,8 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 		// Read the bead once
 		out, err := BdCmd("show", beadID, "--json", "--allow-stale").
 			Dir(resolveBeadDir(beadID)).
-				Stderr(io.Discard).
+			StripBeadsDir().
+			Stderr(io.Discard).
 			Output()
 		if err != nil {
 			return fmt.Errorf("fetching bead: %w", err)
@@ -298,6 +321,9 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	if updates.Args != "" {
 		fields.AttachedArgs = updates.Args
 	}
+	if len(updates.Vars) > 0 {
+		fields.AttachedVars = append([]string(nil), updates.Vars...)
+	}
 	if updates.AttachedMolecule != "" {
 		fields.AttachedMolecule = updates.AttachedMolecule
 		if fields.AttachedAt == "" {
@@ -309,6 +335,9 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	}
 	if updates.NoMerge {
 		fields.NoMerge = true
+	}
+	if updates.ReviewOnly {
+		fields.ReviewOnly = true
 	}
 	if updates.Mode != "" {
 		fields.Mode = updates.Mode
@@ -322,6 +351,9 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	if updates.ConvoyOwned {
 		fields.ConvoyOwned = true
 	}
+	if updates.FormulaVars != "" {
+		fields.FormulaVars = updates.FormulaVars
+	}
 
 	// Write back once
 	newDesc := beads.SetAttachmentFields(issue, fields)
@@ -332,6 +364,7 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 
 	if err := BdCmd("update", beadID, "--description="+newDesc).
 		Dir(resolveBeadDir(beadID)).
+		StripBeadsDir().
 		Run(); err != nil {
 		return fmt.Errorf("updating bead description: %w", err)
 	}
@@ -529,64 +562,14 @@ func agentIDToBeadID(agentID, townRoot string) string {
 	}
 }
 
-// updateAgentHookBead updates the agent bead's state and hook when work is slung.
-// This enables the witness to see that each agent is working.
-//
-// We run from the polecat's workDir (which redirects to the rig's beads database)
-// WITHOUT setting BEADS_DIR, so the redirect mechanism works for gt-* agent beads.
-//
-// For rig-level beads (same database), we set the hook_bead slot directly.
-// For cross-database scenarios (agent in rig db, hook bead in town db),
-// the slot set may fail - this is handled gracefully with a warning.
-// The work is still correctly attached via `bd update <bead> --assignee=<agent>`.
+// updateAgentHookBead is a no-op. Previously set the hook_bead slot on agent beads
+// when work was slung, but this was redundant: the work bead itself tracks
+// status=hooked and assignee=<agent>. Agent bead slot writes caused warnings
+// in cross-database scenarios and added unnecessary Dolt load.
+// Removed per hq-l6mm5: replace bd slot hooks with direct bead tracking.
 func updateAgentHookBead(agentID, beadID, workDir, townBeadsDir string) {
-	_ = townBeadsDir // Not used - BEADS_DIR breaks redirect mechanism
-
-	// Determine the directory to run bd commands from:
-	// - If workDir is provided (polecat's clone path), use it for redirect-based routing
-	// - Otherwise fall back to town root
-	bdWorkDir := workDir
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		// Not in a Gas Town workspace - can't update agent bead
-		fmt.Fprintf(os.Stderr, "Warning: couldn't find town root to update agent hook: %v\n", err)
-		return
-	}
-	if bdWorkDir == "" {
-		bdWorkDir = townRoot
-	}
-
-	// Convert agent ID to agent bead ID
-	// Format examples (canonical: prefix-rig-role-name):
-	//   greenplace/crew/max -> gt-greenplace-crew-max
-	//   greenplace/polecats/Toast -> gt-greenplace-polecat-Toast
-	//   mayor -> hq-mayor
-	//   greenplace/witness -> gt-greenplace-witness
-	agentBeadID := agentIDToBeadID(agentID, townRoot)
-	if agentBeadID == "" {
-		return
-	}
-
-	// Resolve the correct working directory for the agent bead.
-	// Agent beads with rig-level prefixes (e.g., go-) live in rig databases,
-	// not the town database. Use prefix-based resolution to find the correct path.
-	// This fixes go-19z: bd slot commands failing for go-* prefixed beads.
-	agentWorkDir := beads.ResolveHookDir(townRoot, agentBeadID, bdWorkDir)
-
-	// Run from agentWorkDir WITHOUT BEADS_DIR to enable redirect-based routing.
-	// Set hook_bead to the slung work (gt-zecmc: removed agent_state update).
-	// Agent liveness is observable from tmux - no need to record it in bead.
-	// For cross-database scenarios, slot set may fail gracefully (warning only).
-	bd := beads.New(agentWorkDir)
-	if err := bd.SetHookBead(agentBeadID, beadID); err != nil {
-		// Log warning instead of silent ignore - helps debug cross-beads issues
-		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s hook: %v\n", agentBeadID, err)
-		// Dogs created before canonical IDs need recreation: gt dog rm <name> && gt dog add <name>
-		if strings.Contains(agentBeadID, "-dog-") {
-			fmt.Fprintf(os.Stderr, "  (Old dog? Recreate with: gt dog rm <name> && gt dog add <name>)\n")
-		}
-		return
-	}
+	// No-op: work bead status=hooked + assignee is the authoritative source.
+	// Agent bead hook_bead slot is no longer maintained.
 }
 
 // wakeRigAgents wakes the witness for a rig after polecat dispatch.
@@ -638,7 +621,7 @@ func nudgeWitness(rigName, message string) {
 	// Emit a file event so the witness's await-event unblocks instantly.
 	townRoot, _ := workspace.FindFromCwd()
 	if townRoot != "" {
-		_, _ = EmitEventToTown(townRoot, "witness", "POLECAT_DONE", []string{
+		_, _ = channelevents.EmitToTown(townRoot, "witness", "POLECAT_DONE", []string{
 			"source=polecat",
 			"message=" + message,
 		})
@@ -673,7 +656,7 @@ func nudgeRefinery(rigName, message string) {
 	// This is the programmatic bridge between mq submit and the event system.
 	townRoot, _ := workspace.FindFromCwd()
 	if townRoot != "" {
-		_, _ = EmitEventToTown(townRoot, "refinery", "MQ_SUBMIT", []string{
+		_, _ = channelevents.EmitToTown(townRoot, "refinery", "MQ_SUBMIT", []string{
 			"source=sling",
 			"message=" + message,
 		})
@@ -713,8 +696,8 @@ type FormulaOnBeadResult struct {
 //   - extraVars: additional --var values supplied by the user
 //
 // Returns the wisp root ID which should be hooked.
-func InstantiateFormulaOnBead(formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
-	defer func() { telemetry.RecordFormulaInstantiate(context.Background(), formulaName, beadID, retErr) }()
+func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
+	defer func() { telemetry.RecordFormulaInstantiate(ctx, formulaName, beadID, retErr) }()
 	// Route bd mutations (wisp/bond) to the correct beads context for the target bead.
 	formulaWorkDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
 
@@ -739,12 +722,15 @@ func InstantiateFormulaOnBead(formulaName, beadID, title, hookWorkDir, townRoot 
 					Dir(formulaWorkDir).
 					WithGTRoot(townRoot).
 					Run(); retryErr != nil {
+					telemetry.RecordMolCook(ctx, formulaName, retryErr)
 					return nil, fmt.Errorf("cooking formula %s: %w (embedded retry: %v)", formulaName, err, retryErr)
 				}
 			} else {
+				telemetry.RecordMolCook(ctx, formulaName, err)
 				return nil, fmt.Errorf("cooking formula %s: %w", formulaName, err)
 			}
 		}
+		telemetry.RecordMolCook(ctx, formulaName, nil)
 	}
 
 	// Build variable list once so both legacy and fallback paths use
@@ -775,8 +761,10 @@ func InstantiateFormulaOnBead(formulaName, beadID, title, hookWorkDir, townRoot 
 	// Parse wisp output to get the root ID
 	wispRootID, err := parseWispIDFromJSON(wispOut)
 	if err != nil {
+		telemetry.RecordMolWisp(ctx, formulaName, "", beadID, err)
 		return nil, fmt.Errorf("parsing wisp output: %w", err)
 	}
+	telemetry.RecordMolWisp(ctx, formulaName, wispRootID, beadID, nil)
 
 	// Step 3: Bond wisp to original bead (creates compound).
 	//
@@ -923,7 +911,7 @@ func ensureFormulaRequiredVars(formulaName string, vars []string) []string {
 		{"setup_command", ""},
 		{"typecheck_command", ""},
 		{"lint_command", ""},
-		{"test_command", "go test ./..."},
+		{"test_command", ""},
 		{"build_command", ""},
 	}
 	for _, item := range requiredDefaults {
@@ -1105,19 +1093,48 @@ func isSlingConfigError(err error) bool {
 }
 
 // loadRigCommandVars reads rig settings and returns --var key=value strings
-// for all configured build pipeline commands (setup, typecheck, lint, test, build).
-// Only non-empty commands are included; empty means "skip" in the formula.
+// for all configured build pipeline commands (setup, typecheck, lint, test, build)
+// and the default branch (base_branch). Only non-empty values are included.
+//
+// Settings are resolved in priority order:
+//  1. Repository defaults: <rig>/mayor/rig/.gastown/settings.json (committed to git)
+//  2. Rig-local overrides: <rig>/settings/config.json (operator tuning)
+//  3. User --var flags (handled by caller, not here)
 func loadRigCommandVars(townRoot, rig string) []string {
 	if townRoot == "" || rig == "" {
 		return nil
 	}
-	settingsPath := filepath.Join(townRoot, rig, "settings", "config.json")
-	settings, err := config.LoadRigSettings(settingsPath)
-	if err != nil || settings == nil || settings.MergeQueue == nil {
-		return nil
-	}
-	mq := settings.MergeQueue
 	var vars []string
+
+	// Load default_branch from rig root config.json (single source of truth per 5ee9abcc).
+	// This sets base_branch for formula instantiation so polecats fork from the right branch.
+	rigCfg, err := rigpkg.LoadRigConfig(filepath.Join(townRoot, rig))
+	if err == nil && rigCfg != nil && rigCfg.DefaultBranch != "" {
+		vars = append(vars, fmt.Sprintf("base_branch=%s", rigCfg.DefaultBranch))
+	}
+
+	// Load repo-sourced settings (floor — committed to git, always present after clone)
+	var repoMQ *config.MergeQueueConfig
+	repoRoot := filepath.Join(townRoot, rig, "mayor", "rig")
+	repoSettings, _ := config.LoadRepoSettings(repoRoot)
+	if repoSettings != nil {
+		repoMQ = repoSettings.MergeQueue
+	}
+
+	// Load rig-local settings (override — operator tuning)
+	var localMQ *config.MergeQueueConfig
+	settingsPath := filepath.Join(townRoot, rig, "settings", "config.json")
+	localSettings, err := config.LoadRigSettings(settingsPath)
+	if err == nil && localSettings != nil {
+		localMQ = localSettings.MergeQueue
+	}
+
+	// Merge: repo defaults + local overrides
+	mq := config.MergeSettingsCommand(repoMQ, localMQ)
+	if mq == nil {
+		return vars
+	}
+
 	if mq.SetupCommand != "" {
 		vars = append(vars, fmt.Sprintf("setup_command=%s", mq.SetupCommand))
 	}
@@ -1132,6 +1149,12 @@ func loadRigCommandVars(townRoot, rig string) []string {
 	}
 	if mq.BuildCommand != "" {
 		vars = append(vars, fmt.Sprintf("build_command=%s", mq.BuildCommand))
+	}
+	if mq.MergeStrategy != "" {
+		vars = append(vars, fmt.Sprintf("merge_strategy=%s", mq.MergeStrategy))
+	}
+	if mq.IsRequireReviewEnabled() {
+		vars = append(vars, "require_review=true")
 	}
 	return vars
 }
@@ -1199,4 +1222,31 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 	if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{Mode: &mode}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s mode: %v\n", agentBeadID, err)
 	}
+}
+
+// lookupPriorAttempt checks if there are existing open MRs for the given issue.
+// If found, returns formula variables with the prior branch name so the new
+// polecat can cherry-pick or reference prior work instead of starting from scratch.
+// Returns nil if no prior attempt exists. (GH#gt-zqvj)
+func lookupPriorAttempt(beadsDir, issueID string) []string {
+	bd := beads.New(beadsDir)
+	mrs, err := bd.FindOpenMRsForIssue(issueID)
+	if err != nil || len(mrs) == 0 {
+		return nil
+	}
+
+	// Use the most recent MR (last in list) as the prior attempt.
+	prior := mrs[len(mrs)-1]
+	fields := beads.ParseMRFields(prior)
+	if fields == nil || fields.Branch == "" {
+		return nil
+	}
+
+	vars := []string{
+		fmt.Sprintf("prior_branch=%s", fields.Branch),
+	}
+	if fields.CloseReason != "" {
+		vars = append(vars, fmt.Sprintf("prior_failure=%s", fields.CloseReason))
+	}
+	return vars
 }

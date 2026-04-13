@@ -33,7 +33,8 @@ Commands:
   gt config agent get <name>         Show agent configuration
   gt config agent set <name> <cmd>   Set custom agent command
   gt config agent remove <name>      Remove custom agent
-  gt config default-agent [name]     Get or set default agent`,
+  gt config default-agent [name]     Get or set default agent
+  gt config default-agent list       List available agents`,
 }
 
 // Agent subcommands
@@ -41,15 +42,8 @@ Commands:
 var configAgentListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all agents",
-	Long: `List all available agents (built-in and custom).
-
-Shows all built-in agent presets (claude, gemini, codex) and any
-custom agents defined in your town settings.
-
-Examples:
-  gt config agent list           # Text output
-  gt config agent list --json    # JSON output`,
-	RunE: runConfigAgentList,
+	Long:  "", // Set in init() — includes full built-in preset list from config.BuiltInAgentPresetSummary()
+	RunE:  runConfigAgentList,
 }
 
 var configAgentGetCmd = &cobra.Command{
@@ -79,10 +73,16 @@ to all rigs in the town.
 The command can include arguments. Use quotes if the command or
 arguments contain spaces.
 
+The provider preset is inferred from the command binary name when it
+matches a known preset (e.g., "gemini", "claude"). Use --provider to
+set it explicitly for custom binary names. The provider controls
+session handling, tmux detection, hooks, and other runtime defaults.
+
 Examples:
   gt config agent set claude-glm \"claude-glm --model glm-4\"
   gt config agent set gemini-custom gemini --approval-mode yolo
-  gt config agent set claude \"claude-glm\"  # Override built-in claude`,
+  gt config agent set claude \"claude-glm\"  # Override built-in claude
+  gt config agent set my-bot my-bot-cli --provider claude  # Use Claude defaults`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConfigAgentSet,
 }
@@ -90,15 +90,9 @@ Examples:
 var configAgentRemoveCmd = &cobra.Command{
 	Use:   "remove <name>",
 	Short: "Remove custom agent",
-	Long: `Remove a custom agent definition from town settings.
-
-This removes a custom agent from your town settings. Built-in agents
-(claude, gemini, codex) cannot be removed.
-
-Examples:
-  gt config agent remove claude-glm`,
-	Args: cobra.ExactArgs(1),
-	RunE: runConfigAgentRemove,
+	Long:  "", // Set in init() — includes full built-in preset list
+	Args:  cobra.ExactArgs(1),
+	RunE:  runConfigAgentRemove,
 }
 
 // Cost-tier subcommand
@@ -185,22 +179,26 @@ func runConfigCostTier(cmd *cobra.Command, args []string) error {
 var configDefaultAgentCmd = &cobra.Command{
 	Use:   "default-agent [name]",
 	Short: "Get or set default agent",
-	Long: `Get or set the default agent for the town.
+	Long:  "", // Set in init() — includes full built-in preset list
+	RunE:  runConfigDefaultAgent,
+}
 
-With no arguments, shows the current default agent.
-With an argument, sets the default agent to the specified name.
+var configDefaultAgentListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List available agents",
+	Long: `List all available agents that can be set as the default.
 
-The default agent is used when a rig doesn't specify its own agent
-setting. Can be a built-in preset (claude, gemini, codex) or a
-custom agent name.
+Shows all built-in agent presets and any custom agents defined in
+your town settings. Equivalent to 'gt config agent list'.
 
 Examples:
-  gt config default-agent           # Show current default
-  gt config default-agent claude    # Set to claude
-  gt config default-agent gemini    # Set to gemini
-  gt config default-agent my-custom # Set to custom agent`,
-	RunE: runConfigDefaultAgent,
+  gt config default-agent list           # Text output
+  gt config default-agent list --json    # JSON output`,
+	RunE: runConfigAgentList,
 }
+
+// Flags for default-agent list
+var configDefaultAgentListJSON bool
 
 var configAgentEmailDomainCmd = &cobra.Command{
 	Use:   "agent-email-domain [domain]",
@@ -225,7 +223,8 @@ Examples:
 
 // Flags
 var (
-	configAgentListJSON bool
+	configAgentListJSON    bool
+	configAgentSetProvider string
 )
 
 // AgentListItem represents an agent in list output.
@@ -298,7 +297,8 @@ func runConfigAgentList(cmd *cobra.Command, args []string) error {
 		return items[i].Name < items[j].Name
 	})
 
-	if configAgentListJSON {
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+	if jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(items)
@@ -420,10 +420,24 @@ func runConfigAgentSet(cmd *cobra.Command, args []string) error {
 		townSettings.Agents = make(map[string]*config.RuntimeConfig)
 	}
 
+	// Determine the provider: use --provider flag if given, otherwise infer
+	// from the command binary name if it matches a known preset.
+	provider := configAgentSetProvider
+	if provider == "" {
+		cmdBase := parts[0]
+		if idx := strings.LastIndexByte(cmdBase, '/'); idx >= 0 {
+			cmdBase = cmdBase[idx+1:]
+		}
+		if config.IsKnownPreset(cmdBase) {
+			provider = cmdBase
+		}
+	}
+
 	// Create or update the agent
 	townSettings.Agents[name] = &config.RuntimeConfig{
-		Command: parts[0],
-		Args:    parts[1:],
+		Provider: provider,
+		Command:  parts[0],
+		Args:     parts[1:],
 	}
 
 	// Save settings
@@ -533,7 +547,7 @@ func runConfigDefaultAgent(cmd *cobra.Command, args []string) error {
 	}
 
 	if !isValid {
-		return fmt.Errorf("agent '%s' not found (use 'gt config agent list' to see available agents)", name)
+		return fmt.Errorf("agent '%s' not found (use 'gt config default-agent list' to see available agents)", name)
 	}
 
 	// Set default
@@ -607,6 +621,9 @@ Supported keys:
                               completion (true/false, default: false)
   cli_theme                   CLI color scheme ("dark", "light", "auto")
   default_agent               Default agent preset name
+  dolt.port                   Dolt SQL server port (default: 3307). Set this when
+                              another Gas Town instance is using the same port.
+                              Writes GT_DOLT_PORT to mayor/daemon.json env section.
   scheduler.max_polecats      Dispatch mode: -1 = direct (default), N > 0 = deferred
   scheduler.batch_size        Beads per heartbeat (default: 1)
   scheduler.spawn_delay       Delay between spawns (default: 0s)
@@ -630,6 +647,7 @@ Examples:
   gt config set convoy.notify_on_complete true
   gt config set cli_theme dark
   gt config set default_agent claude
+  gt config set dolt.port 3308
   gt config set scheduler.max_polecats 5
   gt config set maintenance.window 03:00
   gt config set maintenance.interval daily
@@ -752,11 +770,31 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	case "maintenance.window", "maintenance.interval", "maintenance.threshold":
 		return setMaintenanceConfig(townRoot, key, value)
 
+	case "dolt.port":
+		port, err := strconv.Atoi(value)
+		if err != nil || port < 1024 || port > 65535 {
+			return fmt.Errorf("invalid value for %s: expected port number 1024-65535", key)
+		}
+		patrolCfg := daemon.LoadPatrolConfig(townRoot)
+		if patrolCfg == nil {
+			patrolCfg = &daemon.DaemonPatrolConfig{Type: "daemon-patrol-config", Version: 1}
+		}
+		if patrolCfg.Env == nil {
+			patrolCfg.Env = make(map[string]string)
+		}
+		patrolCfg.Env["GT_DOLT_PORT"] = value
+		if err := daemon.SavePatrolConfig(townRoot, patrolCfg); err != nil {
+			return fmt.Errorf("saving daemon.json: %w", err)
+		}
+		fmt.Printf("Set GT_DOLT_PORT = %s in mayor/daemon.json\n", style.Bold.Render(value))
+		fmt.Printf("  %s\n", style.Dim.Render("Restart the daemon for the change to take effect: gt daemon restart"))
+		return nil
+
 	default:
 		if strings.HasPrefix(key, "lifecycle.") {
 			return setLifecycleConfig(townRoot, key, value)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	if err := config.SaveTownSettings(settingsPath, townSettings); err != nil {
@@ -826,11 +864,22 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 	case "maintenance.window", "maintenance.interval", "maintenance.threshold":
 		return getMaintenanceConfig(townRoot, key)
 
+	case "dolt.port":
+		patrolCfg := daemon.LoadPatrolConfig(townRoot)
+		if patrolCfg != nil {
+			if v, ok := patrolCfg.Env["GT_DOLT_PORT"]; ok {
+				fmt.Println(v)
+				return nil
+			}
+		}
+		fmt.Println("3307") // DefaultPort
+		return nil
+
 	default:
 		if strings.HasPrefix(key, "lifecycle.") {
 			return getLifecycleConfig(townRoot, key)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	fmt.Println(value)
@@ -1177,8 +1226,47 @@ func parseBool(s string) (bool, error) {
 }
 
 func init() {
+	presets := config.BuiltInAgentPresetSummary()
+
+	configAgentListCmd.Long = fmt.Sprintf(`List all available agents (built-in and custom).
+
+Shows all built-in agent presets (%s) and any
+custom agents defined in your town settings.
+
+Examples:
+  gt config agent list           # Text output
+  gt config agent list --json    # JSON output`, presets)
+
+	configAgentRemoveCmd.Long = fmt.Sprintf(`Remove a custom agent definition from town settings.
+
+This removes a custom agent from your town settings. Built-in agents
+(%s) cannot be removed.
+
+Examples:
+  gt config agent remove claude-glm`, presets)
+
+	configDefaultAgentCmd.Long = fmt.Sprintf(`Get or set the default agent for the town.
+
+With no arguments, shows the current default agent.
+With an argument, sets the default agent to the specified name.
+
+The default agent is used when a rig doesn't specify its own agent
+setting. Can be a built-in preset (%s) or a
+custom agent name.
+
+Use 'gt config default-agent list' to see all available agents.
+
+Examples:
+  gt config default-agent           # Show current default
+  gt config default-agent list      # List available agents
+  gt config default-agent claude    # Set to claude
+  gt config default-agent gemini    # Set to gemini
+  gt config default-agent my-custom # Set to custom agent`, presets)
+
 	// Add flags
 	configAgentListCmd.Flags().BoolVar(&configAgentListJSON, "json", false, "Output as JSON")
+	configDefaultAgentListCmd.Flags().BoolVar(&configDefaultAgentListJSON, "json", false, "Output as JSON")
+	configAgentSetCmd.Flags().StringVar(&configAgentSetProvider, "provider", "", fmt.Sprintf("Agent provider preset (e.g. %s); inferred from command name if not set", presets))
 
 	// Add agent subcommands
 	configAgentCmd := &cobra.Command{
@@ -1194,6 +1282,9 @@ config values such as the default AI model or provider.`,
 	configAgentCmd.AddCommand(configAgentGetCmd)
 	configAgentCmd.AddCommand(configAgentSetCmd)
 	configAgentCmd.AddCommand(configAgentRemoveCmd)
+
+	// Add default-agent subcommands
+	configDefaultAgentCmd.AddCommand(configDefaultAgentListCmd)
 
 	// Add subcommands to config
 	configCmd.AddCommand(configAgentCmd)

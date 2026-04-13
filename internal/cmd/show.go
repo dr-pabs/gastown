@@ -2,9 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"syscall"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -46,16 +44,25 @@ func runShow(cmd *cobra.Command, args []string) error {
 	return execBdShow(args)
 }
 
-// execBdShow replaces the current process with 'bd show'.
-func execBdShow(args []string) error {
-	bdPath, err := exec.LookPath("bd")
-	if err != nil {
-		return fmt.Errorf("bd not found in PATH: %w", err)
+// extractBeadIDFromArgs returns the first non-flag argument, which is the bead ID.
+// Returns empty string if no non-flag argument is found.
+func extractBeadIDFromArgs(args []string) string {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			return arg
+		}
 	}
+	return ""
+}
 
-	// Build args: bd show <all-args>
-	// argv[0] must be the program name for exec
-	fullArgs := append([]string{"bd", "show"}, args...)
-
-	return syscall.Exec(bdPath, fullArgs, os.Environ())
+// stripEnvKey removes all entries matching the given key from an environment slice.
+func stripEnvKey(env []string, key string) []string { //nolint:unparam // key is always BEADS_DIR today but the function is intentionally generic
+	prefix := key + "="
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			result = append(result, e)
+		}
+	}
+	return result
 }

@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -63,13 +65,13 @@ func runRigDetect(cmd *cobra.Command, args []string) error {
 	rigName := detectRigFromPath(townRoot, absPath)
 
 	if rigName != "" {
-		fmt.Printf("export GT_TOWN_ROOT=%q\n", townRoot)
-		fmt.Printf("export GT_ROOT=%q\n", townRoot)
-		fmt.Printf("export GT_RIG=%q\n", rigName)
+		printEnvSet("GT_TOWN_ROOT", townRoot)
+		printEnvSet("GT_ROOT", townRoot)
+		printEnvSet("GT_RIG", rigName)
 	} else {
-		fmt.Printf("export GT_TOWN_ROOT=%q\n", townRoot)
-		fmt.Printf("export GT_ROOT=%q\n", townRoot)
-		fmt.Println("unset GT_RIG")
+		printEnvSet("GT_TOWN_ROOT", townRoot)
+		printEnvSet("GT_ROOT", townRoot)
+		printEnvUnset("GT_RIG")
 	}
 
 	if rigDetectCache != "" {
@@ -95,7 +97,7 @@ func detectRigFromPath(townRoot, absPath string) string {
 	candidateRig := parts[0]
 
 	switch candidateRig {
-	case "mayor", "deacon", ".beads", ".claude", ".git", "plugins":
+	case constants.RoleMayor, constants.RoleDeacon, ".beads", ".claude", ".git", "plugins":
 		return ""
 	}
 
@@ -108,7 +110,11 @@ func detectRigFromPath(townRoot, absPath string) string {
 }
 
 func outputNotInRig() error {
-	fmt.Println("unset GT_TOWN_ROOT GT_ROOT GT_RIG")
+	if runtime.GOOS == "windows" {
+		fmt.Println("Remove-Item Env:GT_TOWN_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue")
+	} else {
+		fmt.Println("unset GT_TOWN_ROOT GT_ROOT GT_RIG")
+	}
 	return nil
 }
 
@@ -132,11 +138,23 @@ func updateRigCache(repoRoot, townRoot, rigName string) error {
 
 	var value string
 	if rigName != "" {
-		value = fmt.Sprintf("export GT_TOWN_ROOT=%q; export GT_ROOT=%q; export GT_RIG=%q", townRoot, townRoot, rigName)
+		if runtime.GOOS == "windows" {
+			value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; $env:GT_RIG=%q", townRoot, townRoot, rigName)
+		} else {
+			value = fmt.Sprintf("export GT_TOWN_ROOT=%q; export GT_ROOT=%q; export GT_RIG=%q", townRoot, townRoot, rigName)
+		}
 	} else if townRoot != "" {
-		value = fmt.Sprintf("export GT_TOWN_ROOT=%q; export GT_ROOT=%q; unset GT_RIG", townRoot, townRoot)
+		if runtime.GOOS == "windows" {
+			value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue", townRoot, townRoot)
+		} else {
+			value = fmt.Sprintf("export GT_TOWN_ROOT=%q; export GT_ROOT=%q; unset GT_RIG", townRoot, townRoot)
+		}
 	} else {
-		value = "unset GT_TOWN_ROOT GT_ROOT GT_RIG"
+		if runtime.GOOS == "windows" {
+			value = "Remove-Item Env:GT_TOWN_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue"
+		} else {
+			value = "unset GT_TOWN_ROOT GT_ROOT GT_RIG"
+		}
 	}
 
 	existing[repoRoot] = value
@@ -147,4 +165,22 @@ func updateRigCache(repoRoot, townRoot, rigName string) error {
 	}
 
 	return os.WriteFile(cachePath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+// printEnvSet prints an OS-appropriate env variable assignment for shell eval.
+func printEnvSet(key, value string) {
+	if runtime.GOOS == "windows" {
+		fmt.Printf("$env:%s=%q\n", key, value)
+	} else {
+		fmt.Printf("export %s=%q\n", key, value)
+	}
+}
+
+// printEnvUnset prints an OS-appropriate env variable unset for shell eval.
+func printEnvUnset(key string) {
+	if runtime.GOOS == "windows" {
+		fmt.Printf("Remove-Item Env:%s -ErrorAction SilentlyContinue\n", key)
+	} else {
+		fmt.Printf("unset %s\n", key)
+	}
 }

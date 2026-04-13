@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
+	gtruntime "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -384,7 +385,8 @@ func TestSessionManager_resolveBeadsDir(t *testing.T) {
 //
 // Without the fallback, GT_AGENT is never written to the tmux session table,
 // and the post-startup validation kills the session with:
-//   "GT_AGENT not set in session ... witness patrol will misidentify this polecat"
+//
+//	"GT_AGENT not set in session ... witness patrol will misidentify this polecat"
 //
 // Regression test for the bug introduced in PR #1776 which removed the
 // unconditional runtimeConfig.ResolvedAgent → SetEnvironment("GT_AGENT") logic
@@ -394,23 +396,23 @@ func TestAgentEnvOmitsGTAgent_FallbackRequired(t *testing.T) {
 
 	// Simulate what session_manager.Start calls for each dispatch scenario.
 	cases := []struct {
-		name       string
-		agent      string // opts.Agent value
-		wantGTAgent bool  // whether GT_AGENT should be in AgentEnv output
+		name        string
+		agent       string // opts.Agent value
+		wantGTAgent bool   // whether GT_AGENT should be in AgentEnv output
 	}{
 		{
-			name:       "default dispatch (no --agent flag)",
-			agent:      "",
+			name:        "default dispatch (no --agent flag)",
+			agent:       "",
 			wantGTAgent: false, // fallback needed
 		},
 		{
-			name:       "explicit --agent codex",
-			agent:      "codex",
+			name:        "explicit --agent codex",
+			agent:       "codex",
 			wantGTAgent: true,
 		},
 		{
-			name:       "explicit --agent gemini",
-			agent:      "gemini",
+			name:        "explicit --agent gemini",
+			agent:       "gemini",
 			wantGTAgent: true,
 		},
 	}
@@ -435,8 +437,8 @@ func TestAgentEnvOmitsGTAgent_FallbackRequired(t *testing.T) {
 }
 
 // TestVerifyStartupNudgeDelivery_IdleAgent tests that verifyStartupNudgeDelivery
-// detects an idle agent (at prompt) and retries the nudge. Uses a real tmux session
-// with a shell prompt that matches the ReadyPromptPrefix.
+// detects an idle agent (at prompt, no busy indicator) and retries the nudge.
+// Uses a real tmux session with a shell prompt that matches the ReadyPromptPrefix.
 func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 	requireTmux(t)
 
@@ -456,6 +458,7 @@ func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 
 	// Configure the shell to show the Claude prompt prefix, simulating an idle agent.
 	// The prompt "❯ " is what Claude Code shows when idle.
+	// No "esc to interrupt" busy indicator — simulates a truly idle agent.
 	time.Sleep(300 * time.Millisecond) // Let shell initialize
 	_ = tm.SendKeys(sessionName, "export PS1='❯ '")
 	time.Sleep(300 * time.Millisecond)
@@ -469,26 +472,28 @@ func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 		},
 	}
 
-	// IsAtPrompt should detect the idle prompt
-	if !tm.IsAtPrompt(sessionName, rc) {
-		t.Log("Warning: prompt not detected (tmux timing); skipping idle verification")
-		t.Skip("prompt detection unreliable in test environment")
+	// IsIdle should detect the idle state (prompt visible, no busy indicator)
+	if !tm.IsIdle(sessionName) {
+		t.Log("Warning: idle state not detected (tmux timing); skipping idle verification")
+		t.Skip("idle detection unreliable in test environment")
 	}
 
 	// verifyStartupNudgeDelivery should detect idle state and retry.
 	// We can't easily assert the retry happened, but we verify it doesn't panic/hang.
 	// Use a goroutine with timeout to prevent test hanging.
+	// Timeout accounts for DefaultStartupNudgeVerifyDelay (25s) * DefaultStartupNudgeMaxRetries (2)
+	// plus overhead = ~60s. Use 90s for safety.
 	done := make(chan struct{})
 	go func() {
-		m.verifyStartupNudgeDelivery(sessionName, rc)
+		m.verifyStartupNudgeDelivery(sessionName, rc, "check your hook")
 		close(done)
 	}()
 
 	select {
 	case <-done:
 		// Success - function completed
-	case <-time.After(30 * time.Second):
-		t.Fatal("verifyStartupNudgeDelivery hung (exceeded 30s timeout)")
+	case <-time.After(90 * time.Second):
+		t.Fatal("verifyStartupNudgeDelivery hung (exceeded 90s timeout)")
 	}
 }
 
@@ -501,7 +506,7 @@ func TestVerifyStartupNudgeDelivery_NilConfig(t *testing.T) {
 	m := NewSessionManager(tmux.NewTmux(), r)
 
 	// Should return immediately without error for nil config
-	m.verifyStartupNudgeDelivery("nonexistent-session", nil)
+	m.verifyStartupNudgeDelivery("nonexistent-session", nil, "")
 
 	// And for config without prompt prefix
 	rc := &config.RuntimeConfig{
@@ -510,7 +515,27 @@ func TestVerifyStartupNudgeDelivery_NilConfig(t *testing.T) {
 			ReadyDelayMs:      1000,
 		},
 	}
-	m.verifyStartupNudgeDelivery("nonexistent-session", rc)
+	m.verifyStartupNudgeDelivery("nonexistent-session", rc, "")
+}
+
+func TestPromptlessFallbackIncludesPrimeAndWorkInstructions(t *testing.T) {
+	beaconConfig := session.BeaconConfig{
+		Recipient:               session.BeaconRecipient("polecat", "toast", "demo"),
+		Sender:                  "witness",
+		Topic:                   "assigned",
+		MolID:                   "demo-123",
+		IncludePrimeInstruction: true,
+		ExcludeWorkInstructions: true,
+	}
+
+	prompt := session.BuildStartupPrompt(beaconConfig, gtruntime.StartupNudgeContent())
+
+	if !strings.Contains(prompt, "Run `gt prime`") {
+		t.Fatalf("prompt missing gt prime instruction: %q", prompt)
+	}
+	if !strings.Contains(prompt, gtruntime.StartupNudgeContent()) {
+		t.Fatalf("prompt missing startup nudge content: %q", prompt)
+	}
 }
 
 func TestValidateSessionName(t *testing.T) {
@@ -567,5 +592,55 @@ func TestValidateSessionName(t *testing.T) {
 				t.Errorf("validateSessionName() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestPolecatSlot(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir
+	polecatsDir := filepath.Join(rigPath, "polecats")
+	if err := os.MkdirAll(polecatsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{
+		Name:     "testrig",
+		Path:     rigPath,
+		Polecats: []string{},
+	}
+	sm := NewSessionManager(tmux.NewTmux(), r)
+
+	// No polecats — should return 0
+	if slot := sm.polecatSlot("alpha"); slot != 0 {
+		t.Errorf("empty dir: got slot %d, want 0", slot)
+	}
+
+	// Create some polecat dirs (sorted: alpha, beta, gamma)
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		if err := os.MkdirAll(filepath.Join(polecatsDir, name), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		name string
+		want int
+	}{
+		{"alpha", 0},
+		{"beta", 1},
+		{"gamma", 2},
+	}
+	for _, tt := range tests {
+		if slot := sm.polecatSlot(tt.name); slot != tt.want {
+			t.Errorf("polecatSlot(%q) = %d, want %d", tt.name, slot, tt.want)
+		}
+	}
+
+	// Hidden dirs should be skipped
+	if err := os.MkdirAll(filepath.Join(polecatsDir, ".hidden"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if slot := sm.polecatSlot("beta"); slot != 1 {
+		t.Errorf("with hidden dir: polecatSlot(beta) = %d, want 1", slot)
 	}
 }

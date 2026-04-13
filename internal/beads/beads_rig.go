@@ -149,6 +149,7 @@ func (b *Beads) CreateRigBead(name string, fields *RigFields) (*Issue, error) {
 		"--title=" + name,
 		"--description=" + description,
 		"--labels=gt:rig",
+		"--type=rig",
 	}
 	if NeedsForceForID(id) {
 		args = append(args, "--force")
@@ -249,6 +250,9 @@ func (b *Beads) ListRigBeads() (map[string]*RigFields, error) {
 		return nil, err
 	}
 
+	if !isJSONBytes(out) {
+		return nil, nil
+	}
 	var issues []*Issue
 	if err := json.Unmarshal(out, &issues); err != nil {
 		return nil, fmt.Errorf("parsing bd list output: %w", err)

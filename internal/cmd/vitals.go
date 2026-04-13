@@ -58,51 +58,58 @@ func printVitalsDoltServers(townRoot string) {
 	}
 
 	// Zombie dolt processes (test servers not cleaned up)
-	for _, z := range findVitalsZombies(config.Port) {
-		fmt.Printf("  %s :%s test zombie PID %s\n", style.Warning.Render("○"), z.port, z.pid)
+	for _, z := range findVitalsZombies(townRoot, config.Port) {
+		if z.foreign {
+			fmt.Printf("  %s :%s foreign workspace PID %s\n", style.Dim.Render("○"), z.port, z.pid)
+		} else {
+			fmt.Printf("  %s :%s test zombie PID %s\n", style.Warning.Render("○"), z.port, z.pid)
+		}
 	}
 }
 
-type vitalsZombie struct{ pid, port string }
+type vitalsZombie struct {
+	pid, port string
+	foreign   bool // true if process belongs to another Gas Town workspace
+}
 
-func findVitalsZombies(prodPort int) []vitalsZombie {
-	out, err := exec.Command("pgrep", "-f", "dolt sql-server").Output()
-	if err != nil {
-		return nil
-	}
-	prodStr := fmt.Sprintf("%d", prodPort)
+// findVitalsZombies finds Dolt servers not on the production port.
+// Uses lsof-based port discovery instead of pgrep/ps string matching (ZFC fix: gt-fj87).
+// Checks workspace ownership to avoid flagging sibling Gas Town instances as zombies.
+func findVitalsZombies(townRoot string, prodPort int) []vitalsZombie {
+	listeners := doltserver.FindAllDoltListeners()
+	expectedDataDir, _ := filepath.Abs(filepath.Join(townRoot, ".dolt-data"))
 	var zombies []vitalsZombie
-	for _, pid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		pid = strings.TrimSpace(pid)
-		if pid == "" {
+	for _, l := range listeners {
+		if l.Port == prodPort {
 			continue
 		}
-		cmdOut, err := exec.Command("ps", "-p", pid, "-o", "args=").Output()
-		if err != nil {
-			continue
+		// Check if this Dolt process belongs to a Gas Town workspace.
+		// If its --data-dir is a .dolt-data directory under a valid workspace,
+		// it's a sibling instance, not a test zombie.
+		dataDir := doltserver.GetDoltDataDirFromProcess(l.PID)
+		if dataDir != "" {
+			absDataDir, _ := filepath.Abs(dataDir)
+			if absDataDir == expectedDataDir {
+				// Our own workspace on a different port — still a zombie
+			} else if filepath.Base(absDataDir) == ".dolt-data" {
+				parentDir := filepath.Dir(absDataDir)
+				if isWs, _ := workspace.IsWorkspace(parentDir); isWs {
+					// Legitimate sibling Gas Town workspace
+					zombies = append(zombies, vitalsZombie{
+						pid:     strconv.Itoa(l.PID),
+						port:    strconv.Itoa(l.Port),
+						foreign: true,
+					})
+					continue
+				}
+			}
 		}
-		line := strings.TrimSpace(string(cmdOut))
-		if !strings.Contains(line, "dolt sql-server") {
-			continue
-		}
-		port := vitalsFlag(line, "--port")
-		if port != "" && port != prodStr {
-			zombies = append(zombies, vitalsZombie{pid, port})
-		}
+		zombies = append(zombies, vitalsZombie{
+			pid:  strconv.Itoa(l.PID),
+			port: strconv.Itoa(l.Port),
+		})
 	}
 	return zombies
-}
-
-func vitalsFlag(cmdLine, flag string) string {
-	parts := strings.Fields(cmdLine)
-	for i, p := range parts {
-		if p == flag && i+1 < len(parts) {
-			return parts[i+1]
-		} else if strings.HasPrefix(p, flag+"=") {
-			return p[len(flag)+1:]
-		}
-	}
-	return ""
 }
 
 func printVitalsDatabases(townRoot string) {

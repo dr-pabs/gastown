@@ -204,6 +204,58 @@ func TestRemoveRigNotFound(t *testing.T) {
 	}
 }
 
+func TestRemoveRigNotFoundWithOrphanDir(t *testing.T) {
+	root, rigsConfig := setupTestTown(t)
+	manager := NewManager(root, rigsConfig, git.NewGit(root))
+
+	// Create an orphaned directory on disk without registering it in config
+	orphanDir := filepath.Join(root, "orphan-rig")
+	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
+		t.Fatalf("creating orphan dir: %v", err)
+	}
+
+	// Manager should still return ErrRigNotFound (UX is handled in cmd layer)
+	err := manager.RemoveRig("orphan-rig")
+	if err != ErrRigNotFound {
+		t.Errorf("RemoveRig orphan dir = %v, want ErrRigNotFound", err)
+	}
+}
+
+func TestUsedNamepoolThemes(t *testing.T) {
+	root, rigsConfig := setupTestTown(t)
+
+	// Register two rigs
+	rigsConfig.Rigs["alpha"] = config.RigEntry{}
+	rigsConfig.Rigs["beta"] = config.RigEntry{}
+
+	// Create settings for alpha with explicit theme
+	alphaSettings := filepath.Join(root, "alpha", "settings")
+	if err := os.MkdirAll(alphaSettings, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(alphaSettings, "config.json"), []byte(`{"type":"rig-settings","version":1,"namepool":{"style":"minerals"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// beta has no settings — should use fallback
+	manager := NewManager(root, rigsConfig, git.NewGit(root))
+	fallback := func(name string) string { return "fallback-" + name }
+	themes := manager.UsedNamepoolThemes(fallback)
+
+	if len(themes) != 2 {
+		t.Fatalf("expected 2 themes, got %d: %v", len(themes), themes)
+	}
+
+	hasAlpha := slices.Contains(themes, "minerals")
+	hasBeta := slices.Contains(themes, "fallback-beta")
+	if !hasAlpha {
+		t.Errorf("expected 'minerals' for alpha, themes: %v", themes)
+	}
+	if !hasBeta {
+		t.Errorf("expected 'fallback-beta' for beta, themes: %v", themes)
+	}
+}
+
 func TestAddRig_RejectsInvalidNames(t *testing.T) {
 	root, rigsConfig := setupTestTown(t)
 	manager := NewManager(root, rigsConfig, git.NewGit(root))
@@ -452,7 +504,7 @@ exit 1
 	if err != nil {
 		t.Fatalf("reading config.yaml: %v", err)
 	}
-	want := "prefix: gt\nissue-prefix: gt\nsync.mode: dolt-native\n"
+	want := "prefix: gt\nissue-prefix: gt\ndolt.idle-timeout: \"0\"\n"
 	if string(config) != want {
 		t.Fatalf("config.yaml = %q, want %q", string(config), want)
 	}
@@ -498,10 +550,6 @@ exit 0
 	// Verify bd config set issue_prefix was called with the correct prefix
 	if !strings.Contains(cmds, "config set issue_prefix myrig") {
 		t.Errorf("expected 'bd config set issue_prefix myrig' in commands log, got:\n%s", cmds)
-	}
-	// Verify sync mode is explicitly set to dolt-native for new rig beads.
-	if !strings.Contains(cmds, "config set sync.mode dolt-native") {
-		t.Errorf("expected 'bd config set sync.mode dolt-native' in commands log, got:\n%s", cmds)
 	}
 }
 
@@ -718,6 +766,10 @@ func TestDeriveBeadsPrefix(t *testing.T) {
 		// With language suffixes stripped
 		{"myproject-py", "my"},
 		{"myproject-go", "my"},
+
+		// Path-like names (slashes stripped)
+		{"/my_app", "ma"},
+		{"/some/deep/path", "pa"},
 	}
 
 	for _, tt := range tests {
@@ -848,8 +900,18 @@ func TestConvertToSSH(t *testing.T) {
 			wantSSH: "git@gitlab.com:owner/repo.git",
 		},
 		{
-			name:    "Unknown host returns empty",
+			name:    "Bitbucket with .git suffix",
 			https:   "https://bitbucket.org/owner/repo.git",
+			wantSSH: "git@bitbucket.org:owner/repo.git",
+		},
+		{
+			name:    "Bitbucket without .git suffix",
+			https:   "https://bitbucket.org/owner/repo",
+			wantSSH: "git@bitbucket.org:owner/repo.git",
+		},
+		{
+			name:    "Unknown host returns empty",
+			https:   "https://gitlab.example.com/owner/repo.git",
 			wantSSH: "",
 		},
 		{
@@ -1224,5 +1286,280 @@ func TestEnsureMetadata_SetsRequiredFields(t *testing.T) {
 		if got != want {
 			t.Errorf("metadata.json %q = %q, want %q", key, got, want)
 		}
+	}
+}
+
+// createTestGitRepoForRig creates a minimal git repo with one commit suitable
+// for use as a remote in AddRig tests. Returns the repo path.
+func createTestGitRepoForRig(t *testing.T, name string) string {
+	t.Helper()
+	repoDir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", name, err)
+	}
+	for _, args := range [][]string{
+		{"git", "init", "--initial-branch=main"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# "+name+"\n"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", "Initial commit"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	return repoDir
+}
+
+// fakeBDForAddRig puts a minimal no-op bd shim on PATH so that AddRig's
+// InitBeads and initAgentBeads calls succeed.
+func fakeBDForAddRig(t *testing.T) {
+	t.Helper()
+	script := `#!/bin/bash
+# no-op bd shim for AddRig tests
+cmd="$1"
+[[ "$cmd" == "--allow-stale" ]] && { shift; cmd="$1"; }
+shift
+case "$cmd" in
+  init|config|slot) exit 0 ;;
+  show) echo "[]" ;;
+  create)
+    id=""; title=""
+    for arg in "$@"; do
+      case "$arg" in --id=*) id="${arg#--id=}" ;; --title=*) title="${arg#--title=}" ;; esac
+    done
+    printf '{"id":"%s","title":"%s","description":"","issue_type":"agent"}' "$id" "$title"
+    ;;
+  *) exit 0 ;;
+esac
+`
+	windowsScript := "@echo off\r\nif \"%1\"==\"init\" exit /b 0\r\nif \"%1\"==\"config\" exit /b 0\r\nif \"%1\"==\"slot\" exit /b 0\r\nif \"%1\"==\"--allow-stale\" shift\r\nif \"%1\"==\"show\" echo [] & exit /b 0\r\nif \"%1\"==\"create\" echo {\"id\":\"x\",\"title\":\"x\"} & exit /b 0\r\nexit /b 0\r\n"
+	binDir := writeFakeBD(t, script, windowsScript)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestAddRig_UpstreamURL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based bd shim not reliable on Windows CI")
+	}
+
+	fakeBDForAddRig(t)
+
+	root, rigsConfig := setupTestTown(t)
+	forkURL := createTestGitRepoForRig(t, "fork")
+	upstreamURL := createTestGitRepoForRig(t, "upstream")
+
+	manager := NewManager(root, rigsConfig, git.NewGit(root))
+
+	rig, err := manager.AddRig(AddRigOptions{
+		Name:          "forkrig",
+		GitURL:        forkURL,
+		UpstreamURL:   upstreamURL,
+		BeadsPrefix:   "fk",
+		SkipDoltCheck: true,
+	})
+	if err != nil {
+		t.Fatalf("AddRig: %v", err)
+	}
+
+	rigPath := filepath.Join(root, "forkrig")
+
+	t.Run("bare repo upstream remote", func(t *testing.T) {
+		bareGit := git.NewGitWithDir(filepath.Join(rigPath, ".repo.git"), "")
+		got, err := bareGit.GetUpstreamURL()
+		if err != nil {
+			t.Fatalf("GetUpstreamURL: %v", err)
+		}
+		if got != upstreamURL {
+			t.Errorf("bare upstream = %q, want %q", got, upstreamURL)
+		}
+	})
+
+	t.Run("mayor clone upstream remote", func(t *testing.T) {
+		mayorGit := git.NewGit(filepath.Join(rigPath, "mayor", "rig"))
+		got, err := mayorGit.GetUpstreamURL()
+		if err != nil {
+			t.Fatalf("GetUpstreamURL: %v", err)
+		}
+		if got != upstreamURL {
+			t.Errorf("mayor upstream = %q, want %q", got, upstreamURL)
+		}
+	})
+
+	t.Run("config.json round-trips upstream_url", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join(rigPath, "config.json"))
+		if err != nil {
+			t.Fatalf("reading config.json: %v", err)
+		}
+		var cfg RigConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("parsing config.json: %v", err)
+		}
+		if cfg.UpstreamURL != upstreamURL {
+			t.Errorf("config.json UpstreamURL = %q, want %q", cfg.UpstreamURL, upstreamURL)
+		}
+	})
+
+	t.Run("town registry persists upstream_url", func(t *testing.T) {
+		entry, ok := rigsConfig.Rigs["forkrig"]
+		if !ok {
+			t.Fatal("rig not found in town config")
+		}
+		if entry.UpstreamURL != upstreamURL {
+			t.Errorf("RigEntry.UpstreamURL = %q, want %q", entry.UpstreamURL, upstreamURL)
+		}
+	})
+
+	_ = rig
+}
+
+// TestAddRig_BranchFlag verifies that --branch is passed to the bare clone so
+// the bare repo's HEAD and origin tracking ref both point to the specified branch.
+func TestAddRig_BranchFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based bd shim not reliable on Windows CI")
+	}
+
+	fakeBDForAddRig(t)
+
+	// Create a remote with two branches: main (default) and develop.
+	repoDir := t.TempDir()
+	for _, args := range [][]string{
+		{"git", "init", "--initial-branch=main", repoDir},
+		{"git", "-C", repoDir, "config", "user.email", "test@test.com"},
+		{"git", "-C", repoDir, "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# test\n"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "-C", repoDir, "add", "."},
+		{"git", "-C", repoDir, "commit", "-m", "Initial commit"},
+		{"git", "-C", repoDir, "checkout", "-b", "develop"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "develop.txt"), []byte("develop branch\n"), 0644); err != nil {
+		t.Fatalf("write develop.txt: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "-C", repoDir, "add", "."},
+		{"git", "-C", repoDir, "commit", "-m", "develop commit"},
+		// Switch back to main so remote HEAD points to main (the default branch).
+		{"git", "-C", repoDir, "checkout", "main"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+
+	root, rigsConfig := setupTestTown(t)
+	manager := NewManager(root, rigsConfig, git.NewGit(root))
+
+	_, err := manager.AddRig(AddRigOptions{
+		Name:          "testrig",
+		GitURL:        repoDir,
+		BeadsPrefix:   "tr",
+		DefaultBranch: "develop",
+		SkipDoltCheck: true,
+	})
+	if err != nil {
+		t.Fatalf("AddRig: %v", err)
+	}
+
+	rigPath := filepath.Join(root, "testrig")
+	bareRepoPath := filepath.Join(rigPath, ".repo.git")
+	bareGit := git.NewGitWithDir(bareRepoPath, "")
+
+	t.Run("bare repo HEAD points to develop", func(t *testing.T) {
+		got := bareGit.DefaultBranch()
+		if got != "develop" {
+			t.Errorf("bare repo DefaultBranch() = %q, want %q", got, "develop")
+		}
+	})
+
+	t.Run("origin/develop tracking ref exists in bare repo", func(t *testing.T) {
+		exists, err := bareGit.RefExists("refs/remotes/origin/develop")
+		if err != nil {
+			t.Fatalf("RefExists: %v", err)
+		}
+		if !exists {
+			t.Error("refs/remotes/origin/develop does not exist in bare repo")
+		}
+	})
+
+	t.Run("config.json DefaultBranch is develop", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join(rigPath, "config.json"))
+		if err != nil {
+			t.Fatalf("reading config.json: %v", err)
+		}
+		var cfg RigConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("parsing config.json: %v", err)
+		}
+		if cfg.DefaultBranch != "develop" {
+			t.Errorf("config.json DefaultBranch = %q, want %q", cfg.DefaultBranch, "develop")
+		}
+	})
+}
+
+// TestBareCloneDefaultBranch verifies that DefaultBranch() returns the correct
+// branch for a bare clone whose remote uses a non-"main" default branch.
+func TestBareCloneDefaultBranch(t *testing.T) {
+	// Create a source repo with "master" as the default branch.
+	// Override GIT_CONFIG_GLOBAL so user config (e.g. init.defaultBranch)
+	// doesn't interfere.
+	srcDir := t.TempDir()
+	gitEnv := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	for _, args := range [][]string{
+		{"git", "init", "-b", "master", srcDir},
+		{"git", "-C", srcDir, "config", "user.email", "test@test.com"},
+		{"git", "-C", srcDir, "config", "user.name", "Test"},
+		{"git", "-C", srcDir, "commit", "--allow-empty", "-m", "init"},
+	} {
+		c := exec.Command(args[0], args[1:]...)
+		c.Env = gitEnv
+		out, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+
+	// Bare-clone it, just like AddRig does.
+	// Use a subdirectory that doesn't exist yet so git clone creates it
+	// (cloning into an existing dir may skip HEAD setup on some git versions).
+	bareDir := filepath.Join(t.TempDir(), "repo.git")
+	c := exec.Command("git", "clone", "--bare", srcDir, bareDir)
+	c.Env = gitEnv
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bare clone: %s", out)
+	}
+
+	g := git.NewGit(bareDir)
+	if got := g.DefaultBranch(); got != "master" {
+		t.Errorf("DefaultBranch() = %q, want %q", got, "master")
 	}
 }
