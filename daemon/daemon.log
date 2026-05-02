@@ -4478,3 +4478,16 @@ Error: creating wisp: failed to create issue from mol-dog-checkpoint: database n
 2026/05/03 00:02:37 Boot spawn skipped: Deacon is healthy and no active work in flight
 2026/05/03 00:02:38 Handler: no idle dogs available, deferring remaining plugins
 2026/05/03 00:02:40 Heartbeat complete (#41)
+2026/05/03 00:04:26 Convoy: close detected: hq-wisp-4oia (from hq)
+2026/05/03 00:04:36 doctor_dog: pouring molecule for agent execution
+2026/05/03 00:04:37 dog_molecule: discover steps: parse children JSON for hq-wisp-edzb failed: unrecognized JSON shape: {
+  "hq-wisp-edzb": [],
+  "schema_version": 1
+}
+2026/05/03 00:04:37 dog_molecule: poured mol-dog-doctor → hq-wisp-edzb (0 steps)
+2026/05/03 00:04:37 doctor_dog: poured mol-dog-doctor → hq-wisp-edzb
+2026/05/03 00:04:37 dog_molecule: closeRemainingSteps: parse children JSON for hq-wisp-edzb failed: unrecognized JSON shape: {
+  "hq-wisp-edzb": [],
+  "schema_version": 1
+}
+2026/05/03 00:04:41 Convoy: close detected: hq-wisp-edzb (from hq)
