@@ -1,0 +1,10 @@
+{
+  "running": true,
+  "pid": 58765,
+  "port": 3307,
+  "started_at": "2026-04-29T21:50:37.205454+01:00",
+  "data_dir": "/Users/rpaulbrownicloud.com/gt/.dolt-data",
+  "databases": [
+    "hq"
+  ]
+}
