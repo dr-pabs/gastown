@@ -4528,3 +4528,8 @@ Error: creating wisp: failed to create issue from mol-dog-checkpoint: database n
 }
 2026/05/03 00:09:41 Convoy: close detected: hq-wisp-5yfd (from hq)
 2026/05/03 00:09:41 Convoy: close detected: hq-wisp-4r9f (from hq)
+2026/05/03 00:11:26 Convoy: close detected: hq-wisp-pfmc (from hq)
+2026/05/03 00:11:46 Heartbeat starting (recovery-focused)
+2026/05/03 00:11:46 Boot spawn skipped: Deacon is healthy and no active work in flight
+2026/05/03 00:11:46 Handler: no idle dogs available, deferring remaining plugins
+2026/05/03 00:11:49 Heartbeat complete (#44)
