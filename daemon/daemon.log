@@ -4500,3 +4500,31 @@ Error: creating wisp: failed to create issue from mol-dog-checkpoint: database n
 2026/05/03 00:08:43 Boot spawn skipped: Deacon is healthy and no active work in flight
 2026/05/03 00:08:43 Handler: no idle dogs available, deferring remaining plugins
 2026/05/03 00:08:46 Heartbeat complete (#43)
+2026/05/03 00:09:36 doctor_dog: pouring molecule for agent execution
+2026/05/03 00:09:36 Convoy: close detected: hq-wisp-al3m (from hq)
+2026/05/03 00:09:37 dog_molecule: discover steps: parse children JSON for hq-wisp-5yfd failed: unrecognized JSON shape: {
+  "hq-wisp-5yfd": [],
+  "schema_version": 1
+}
+2026/05/03 00:09:37 dog_molecule: poured mol-dog-doctor → hq-wisp-5yfd (0 steps)
+2026/05/03 00:09:37 doctor_dog: poured mol-dog-doctor → hq-wisp-5yfd
+2026/05/03 00:09:37 dog_molecule: closeRemainingSteps: parse children JSON for hq-wisp-5yfd failed: unrecognized JSON shape: {
+  "hq-wisp-5yfd": [],
+  "schema_version": 1
+}
+2026/05/03 00:09:37 checkpoint_dog: starting cycle
+2026/05/03 00:09:38 dog_molecule: discover steps: parse children JSON for hq-wisp-4r9f failed: unrecognized JSON shape: {
+  "hq-wisp-4r9f": [],
+  "schema_version": 1
+}
+2026/05/03 00:09:38 dog_molecule: poured mol-dog-checkpoint → hq-wisp-4r9f (0 steps)
+2026/05/03 00:09:38 dog_molecule: closeStep "scan": unknown step (known: [])
+2026/05/03 00:09:38 dog_molecule: closeStep "checkpoint": unknown step (known: [])
+2026/05/03 00:09:38 checkpoint_dog: cycle complete — scanned 0 worktrees, checkpointed 0
+2026/05/03 00:09:38 dog_molecule: closeStep "report": unknown step (known: [])
+2026/05/03 00:09:38 dog_molecule: closeRemainingSteps: parse children JSON for hq-wisp-4r9f failed: unrecognized JSON shape: {
+  "hq-wisp-4r9f": [],
+  "schema_version": 1
+}
+2026/05/03 00:09:41 Convoy: close detected: hq-wisp-5yfd (from hq)
+2026/05/03 00:09:41 Convoy: close detected: hq-wisp-4r9f (from hq)
