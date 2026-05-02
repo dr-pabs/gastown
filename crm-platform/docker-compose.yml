@@ -1,0 +1,85 @@
+# CRM Platform — Local Development Infrastructure
+# Starts: SQL Server (with RLS), Service Bus emulator, Azurite, Mailpit
+# Usage: make dev-infra  (infrastructure only)
+#        make dev        (full stack — see Makefile)
+# See ADR 0012 and docs/local-development.md for full details.
+
+services:
+
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: crm-sql
+    environment:
+      SA_PASSWORD: "Dev_Password_123!"   # Local dev only — never used in any Azure environment
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sql-data:/var/opt/mssql
+      - ./scripts/local/sql-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "Dev_Password_123!", "-Q", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  servicebus-emulator:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    container_name: crm-servicebus
+    ports:
+      - "5672:5672"    # AMQP
+      - "8080:8080"    # Management UI
+    volumes:
+      - ./scripts/local/servicebus-config.json:/ServiceBus_Emulator/ConfigFiles/Config.json
+    environment:
+      SQL_SERVER: "sql"
+      MSSQL_SA_PASSWORD: "Dev_Password_123!"
+      ACCEPT_EULA: "Y"
+    depends_on:
+      sql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: crm-azurite
+    ports:
+      - "10000:10000"  # Blob storage
+      - "10001:10001"  # Queue storage
+      - "10002:10002"  # Table storage
+    volumes:
+      - azurite-data:/data
+    command: "azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --location /data --debug /data/debug.log"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: crm-mailpit
+    ports:
+      - "1025:1025"    # SMTP — services send email here
+      - "8025:8025"    # Web UI — view outbound emails at http://localhost:8025
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8025"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  sql-data:
+    driver: local
+  azurite-data:
+    driver: local

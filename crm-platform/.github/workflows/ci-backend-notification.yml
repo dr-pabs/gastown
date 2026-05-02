@@ -1,0 +1,77 @@
+name: CI – notification-service
+
+on:
+  push:
+    paths:
+      - 'src/services/notification-service/**'
+      - '.github/workflows/ci-backend-notification.yml'
+  pull_request:
+    paths:
+      - 'src/services/notification-service/**'
+      - '.github/workflows/ci-backend-notification.yml'
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  SERVICE_PATH: src/services/notification-service
+  TEST_PROJECT: src/services/notification-service/Tests/CrmPlatform.NotificationService.Tests.csproj
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ${{ env.SERVICE_PATH }}/CrmPlatform.NotificationService.csproj
+
+      - name: Build
+        run: dotnet build ${{ env.SERVICE_PATH }}/CrmPlatform.NotificationService.csproj --no-restore --configuration Release
+
+      - name: Test – all
+        run: |
+          dotnet test ${{ env.TEST_PROJECT }} \
+            --no-build \
+            --configuration Release \
+            --logger "trx;LogFileName=test-results.trx" \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./coverage
+
+      - name: Test – tenant isolation only
+        run: |
+          dotnet test ${{ env.TEST_PROJECT }} \
+            --no-build \
+            --configuration Release \
+            --filter "Category=TenantIsolation" \
+            --logger "trx;LogFileName=tenant-isolation-results.trx"
+
+      - name: Coverage gate (≥ 80%)
+        uses: danielpalme/ReportGenerator-GitHub-Action@5
+        with:
+          reports: 'coverage/**/coverage.cobertura.xml'
+          targetdir: 'coverage/report'
+          reporttypes: 'TextSummary'
+          minimumcoverageThresholds: '80'
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notification-test-results
+          path: |
+            **/*.trx
+            coverage/report/
+
+      - name: Publish coverage summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notification-coverage
+          path: coverage/

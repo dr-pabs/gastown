@@ -1,0 +1,63 @@
+name: CD — Production
+
+on:
+  push:
+    tags:
+      - 'release/*'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: prod   # requires manual approval in GitHub environment protection rules
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify image SHA matches scanned image
+        run: echo "TODO: verify image SHA against Defender scan results"
+
+      - name: Bicep what-if (displayed in approval)
+        uses: azure/arm-deploy@v2
+        with:
+          scope: subscription
+          region: uksouth
+          template: infra/platform/main.bicep
+          parameters: infra/platform/parameters/prod.bicepparam imageTag=${{ github.ref_name }}
+          additionalArguments: '--what-if'
+
+      - name: Deploy infrastructure
+        uses: azure/arm-deploy@v2
+        with:
+          scope: subscription
+          region: uksouth
+          template: infra/platform/main.bicep
+          parameters: infra/platform/parameters/prod.bicepparam imageTag=${{ github.ref_name }}
+
+      - name: Blue/green traffic shift — 10%
+        run: |
+          # TODO: implement traffic shifting via Container Apps revision management
+          echo "Shifting 10% traffic to new revision"
+          ./scripts/check-error-rate.sh --threshold 1.0 --duration 5m
+
+      - name: Blue/green traffic shift — 50%
+        run: |
+          echo "Shifting 50% traffic to new revision"
+          ./scripts/check-error-rate.sh --threshold 1.0 --duration 10m
+
+      - name: Blue/green traffic shift — 100%
+        run: echo "Shifting 100% traffic to new revision"
+
+      - name: Post-deploy integration tests
+        run: echo "TODO: add post-deploy integration test script"

@@ -1,0 +1,24 @@
+{
+  "schema_version": "v1",
+  "name_for_model": "crm_ai",
+  "name_for_human": "CRM AI Assistant",
+  "description_for_model": "Provides AI-powered CRM capabilities: draft sales emails, summarise support cases, retrieve lead scores, and get next-best-action recommendations. Always confirm the tenant context is set before calling these APIs.",
+  "description_for_human": "AI tools for your CRM: email drafts, case summaries, lead scores and sales recommendations.",
+  "auth": {
+    "type": "oauth",
+    "client_url": "https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/authorize",
+    "scope": "api://crm-ai-service/.default",
+    "authorization_url": "https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token",
+    "authorization_content_type": "application/x-www-form-urlencoded",
+    "verification_tokens": {
+      "openai": ""
+    }
+  },
+  "api": {
+    "type": "openapi",
+    "url": "/ai/openapi.json"
+  },
+  "logo_url": "/ai/logo.png",
+  "contact_email": "admin@crm-platform.example",
+  "legal_info_url": "https://crm-platform.example/legal"
+}

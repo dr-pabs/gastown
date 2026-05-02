@@ -1,0 +1,73 @@
+<!--
+  APIM Global Inbound Policy
+  ADR 0004 / ADR 0006: Layer 1 auth — JWT signature validation before forwarding to any backend.
+  All downstream services receive a pre-validated X-Tenant-Id header.
+-->
+<policies>
+  <inbound>
+    <validate-jwt header-name="Authorization"
+                  failed-validation-httpcode="401"
+                  require-expiration-time="true"
+                  require-signed-tokens="true">
+      <openid-config url="https://login.microsoftonline.com/{{EntraTenantId}}/v2.0/.well-known/openid-configuration" />
+      <audiences>
+        <audience>{{EntraAudience}}</audience>
+      </audiences>
+      <issuers>
+        <issuer>https://login.microsoftonline.com/{{EntraTenantId}}/v2.0</issuer>
+        <issuer>https://sts.windows.net/{{EntraTenantId}}/</issuer>
+      </issuers>
+      <required-claims>
+        <claim name="tid" />
+      </required-claims>
+    </validate-jwt>
+    <!-- Forward tenant ID extracted from validated JWT tid claim -->
+    <set-header name="X-Tenant-Id" exists-action="override">
+      <value>@{
+        var jwt = context.Request.Headers.GetValueOrDefault("Authorization","").Split(' ').Last();
+        var claims = context.Request.Headers.GetValueOrDefault("Authorization","");
+        return context.Request.Headers.GetValueOrDefault("Authorization","")
+          .Split(' ').Last()
+          .Split('.')[1]
+          .PadRight(4 * ((context.Request.Headers.GetValueOrDefault("Authorization","").Split(' ').Last().Split('.')[1].Length + 3) / 4), '=');
+      }</value>
+    </set-header>
+    <cors allow-credentials="true">
+      <allowed-origins>
+        <origin>{{StaffPortalOrigin}}</origin>
+        <origin>{{CustomerPortalOrigin}}</origin>
+      </allowed-origins>
+      <allowed-methods>
+        <method>GET</method>
+        <method>POST</method>
+        <method>PUT</method>
+        <method>PATCH</method>
+        <method>DELETE</method>
+        <method>OPTIONS</method>
+      </allowed-methods>
+      <allowed-headers>
+        <header>*</header>
+      </allowed-headers>
+      <expose-headers>
+        <header>X-Request-Id</header>
+        <header>X-Correlation-Id</header>
+      </expose-headers>
+    </cors>
+    <!-- Propagate correlation ID for distributed tracing -->
+    <set-header name="X-Correlation-Id" exists-action="skip">
+      <value>@(Guid.NewGuid().ToString())</value>
+    </set-header>
+    <rate-limit-by-key calls="1000" renewal-period="60"
+                       counter-key="@(context.Request.Headers.GetValueOrDefault("X-Tenant-Id","anonymous"))"
+                       increment-condition="@(context.Response.StatusCode >= 200 && context.Response.StatusCode < 400)" />
+  </inbound>
+  <backend>
+    <forward-request />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

@@ -1,0 +1,27 @@
+using CrmPlatform.ServiceTemplate.Domain;
+using Microsoft.AspNetCore.Http;
+
+namespace CrmPlatform.CssService.Api;
+
+internal static class ResultHttpExtensions
+{
+    public static IResult ToHttpResult(this Result result) =>
+        result.Error is null
+            ? Results.BadRequest()
+            : ToHttpResult(result.Error);
+
+    public static IResult ToHttpResult<T>(this Result<T> result) =>
+        result.Error is null
+            ? Results.BadRequest()
+            : ToHttpResult(result.Error);
+
+    private static IResult ToHttpResult(ResultError error) => error.Code switch
+    {
+        ResultErrorCode.NotFound => Results.NotFound(new { error = error.Message }),
+        ResultErrorCode.Forbidden or ResultErrorCode.TenantMismatch => Results.Forbid(),
+        ResultErrorCode.Conflict => Results.Conflict(new { error = error.Message }),
+        ResultErrorCode.ValidationError => Results.UnprocessableEntity(new { error = error.Message }),
+        ResultErrorCode.ExternalServiceError => Results.BadGateway(new { error = error.Message }),
+        _ => Results.BadRequest(new { error = error.Message })
+    };
+}

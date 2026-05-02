@@ -1,0 +1,48 @@
+name: Drift Detection
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 02:00 UTC daily
+  workflow_dispatch:       # manual trigger
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  detect-drift:
+    name: Detect Infrastructure Drift — ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, test, staging, prod]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets[format('AZURE_CLIENT_ID_{0}', matrix.environment)] }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets[format('AZURE_SUBSCRIPTION_ID_{0}', matrix.environment)] }}
+
+      - name: Bicep what-if (drift check)
+        id: whatif
+        run: |
+          result=$(az deployment sub what-if \
+            --location uksouth \
+            --template-file infra/platform/main.bicep \
+            --parameters @infra/platform/parameters/${{ matrix.environment }}.bicepparam \
+            --output json 2>&1)
+          echo "$result"
+          if echo "$result" | grep -q '"changeType": "Modify\|Create\|Delete"'; then
+            echo "DRIFT_DETECTED=true" >> $GITHUB_ENV
+          fi
+
+      - name: Alert on drift
+        if: env.DRIFT_DETECTED == 'true'
+        run: |
+          echo "TODO: send Teams/Slack alert for drift in ${{ matrix.environment }}"
+          echo "Drift detected in ${{ matrix.environment }} environment"

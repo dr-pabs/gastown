@@ -1,0 +1,72 @@
+{
+  "UserConfig": {
+    "Namespaces": [
+      {
+        "Name": "crm-local",
+        "Queues": [],
+        "Topics": [
+          {
+            "Name": "crm.sfa",
+            "Subscriptions": [
+              { "Name": "sfa-service" },
+              { "Name": "marketing-service" },
+              { "Name": "analytics-service" },
+              { "Name": "notification-service" }
+            ]
+          },
+          {
+            "Name": "crm.css",
+            "Subscriptions": [
+              { "Name": "css-service" },
+              { "Name": "sfa-service" },
+              { "Name": "notification-service" },
+              { "Name": "analytics-service" }
+            ]
+          },
+          {
+            "Name": "crm.marketing",
+            "Subscriptions": [
+              { "Name": "marketing-service" },
+              { "Name": "sfa-service" },
+              { "Name": "analytics-service" },
+              { "Name": "notification-service" }
+            ]
+          },
+          {
+            "Name": "crm.identity",
+            "Subscriptions": [
+              { "Name": "identity-service" },
+              { "Name": "platform-admin-service" }
+            ]
+          },
+          {
+            "Name": "crm.platform",
+            "Subscriptions": [
+              { "Name": "platform-admin-service" },
+              { "Name": "identity-service" },
+              { "Name": "marketing-service" },
+              { "Name": "css-service" },
+              { "Name": "analytics-service" },
+              { "Name": "notification-service" }
+            ]
+          },
+          {
+            "Name": "crm.analytics",
+            "Subscriptions": [
+              { "Name": "analytics-service" }
+            ]
+          },
+          {
+            "Name": "crm.ai",
+            "Subscriptions": [
+              { "Name": "ai-orchestration-service" }
+            ]
+          }
+        ]
+      }
+    ],
+    "Logging": {
+      "Type": "File"
+    }
+  }
+}

@@ -1,0 +1,60 @@
+name: CD — Dev
+
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  id-token: write   # OIDC auth to Azure — no stored credentials
+  contents: read
+
+env:
+  ACR_NAME: crmdevacr  # TODO: set actual ACR name
+  AZURE_SUBSCRIPTION_ID: ''  # TODO: set via GitHub environment secret
+
+jobs:
+  build-push-deploy:
+    name: Build, Push & Deploy to Dev
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC — no stored credentials)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build & push container images
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+          IMAGE_TAG=sha-${{ github.sha }}
+          for service in sfa-service css-service marketing-service analytics-service \
+            ai-orchestration-service identity-service integration-service \
+            notification-service platform-admin-service; do
+            echo "Building $service"
+            docker build -t ${{ env.ACR_NAME }}.azurecr.io/$service:$IMAGE_TAG \
+              src/services/$service
+            docker push ${{ env.ACR_NAME }}.azurecr.io/$service:$IMAGE_TAG
+          done
+
+      - name: Microsoft Defender — image scan (block on critical CVEs)
+        run: echo "TODO: wire up Defender for Containers image scan"
+
+      - name: Deploy infrastructure (Bicep)
+        uses: azure/arm-deploy@v2
+        with:
+          scope: subscription
+          region: uksouth
+          template: infra/platform/main.bicep
+          parameters: infra/platform/parameters/dev.bicepparam imageTag=sha-${{ github.sha }}
+
+      - name: Smoke tests
+        run: echo "TODO: add smoke test script"
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "TODO: wire up Teams/Slack notification"

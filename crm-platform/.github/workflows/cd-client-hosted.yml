@@ -1,0 +1,64 @@
+name: CD — Client Hosted
+
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: 'Client ID (must match a file in infra/client-hosted/parameters/)'
+        required: true
+        type: string
+      image_tag:
+        description: 'Container image tag to deploy'
+        required: true
+        default: 'latest'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-client:
+    name: Deploy to ${{ inputs.client_id }}
+    runs-on: ubuntu-latest
+    environment: client-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate parameter file exists
+        run: |
+          if [ ! -f "infra/client-hosted/parameters/${{ inputs.client_id }}.bicepparam" ]; then
+            echo "ERROR: Parameter file not found for client ${{ inputs.client_id }}"
+            exit 1
+          fi
+
+      - name: Azure Login (OIDC — using client's service principal)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets[format('CLIENT_{0}_AZURE_CLIENT_ID', inputs.client_id)] }}
+          tenant-id: ${{ secrets[format('CLIENT_{0}_AZURE_TENANT_ID', inputs.client_id)] }}
+          subscription-id: ${{ secrets[format('CLIENT_{0}_AZURE_SUBSCRIPTION_ID', inputs.client_id)] }}
+
+      - name: Bicep what-if (review before deploy)
+        uses: azure/arm-deploy@v2
+        with:
+          scope: subscription
+          region: uksouth
+          template: infra/client-hosted/main.bicep
+          parameters: infra/client-hosted/parameters/${{ inputs.client_id }}.bicepparam imageTag=${{ inputs.image_tag }}
+          additionalArguments: '--what-if'
+
+      - name: Deploy to client subscription
+        uses: azure/arm-deploy@v2
+        with:
+          scope: subscription
+          region: uksouth
+          template: infra/client-hosted/main.bicep
+          parameters: infra/client-hosted/parameters/${{ inputs.client_id }}.bicepparam imageTag=${{ inputs.image_tag }}
+
+      - name: Post-deploy validation
+        run: echo "TODO: add post-deploy health check script"
+
+      - name: Register deployment in Platform Admin Portal
+        run: echo "TODO: call Platform Admin Portal API to register client deployment"

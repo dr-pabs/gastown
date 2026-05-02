@@ -1,0 +1,18 @@
+name: Synchronize ADR
+
+on:
+  push:
+    branches:
+      - main
+  discussion:
+    types: [created, edited]
+
+jobs:
+  sync-adr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run ADR Sync Action
+        uses: yujiosaka/adr-sync@v1
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}

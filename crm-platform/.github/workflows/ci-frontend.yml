@@ -1,0 +1,53 @@
+name: CI — Frontend
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/frontend/**'
+
+jobs:
+  build-and-test:
+    name: Build & Test — ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - staff-portal
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: src/frontend/${{ matrix.app }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: src/frontend/${{ matrix.app }}
+
+      - name: TypeScript check
+        run: npm run type-check
+        working-directory: src/frontend/${{ matrix.app }}
+
+      - name: Lint
+        run: npm run lint
+        working-directory: src/frontend/${{ matrix.app }}
+
+      - name: Unit tests
+        run: npm run test -- --coverage
+        working-directory: src/frontend/${{ matrix.app }}
+
+      - name: Build
+        run: npm run build
+        working-directory: src/frontend/${{ matrix.app }}
+
+      - name: Bundle size check (warn if > 500KB gzipped)
+        run: |
+          # TODO: wire up bundlesize or similar
+          echo "Bundle size check to be implemented"
+        working-directory: src/frontend/${{ matrix.app }}

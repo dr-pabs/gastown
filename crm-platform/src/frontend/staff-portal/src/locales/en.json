@@ -1,0 +1,236 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "leads": "Leads",
+    "contacts": "Contacts",
+    "accounts": "Accounts",
+    "opportunities": "Opportunities",
+    "cases": "Cases",
+    "campaigns": "Campaigns",
+    "journeys": "Journeys",
+    "analytics": "Analytics",
+    "notifications": "Notifications",
+    "settings": "Settings"
+  },
+  "common": {
+    "loading": "Loading...",
+    "error": "An error occurred",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "create": "Create",
+    "search": "Search",
+    "filter": "Filter",
+    "export": "Export",
+    "back": "Back",
+    "next": "Next",
+    "previous": "Previous",
+    "close": "Close",
+    "confirm": "Confirm",
+    "yes": "Yes",
+    "no": "No",
+    "noResults": "No results found",
+    "required": "This field is required",
+    "actions": "Actions",
+    "status": "Status",
+    "createdAt": "Created",
+    "updatedAt": "Updated",
+    "name": "Name",
+    "email": "Email",
+    "phone": "Phone",
+    "notes": "Notes",
+    "description": "Description",
+    "assignedTo": "Assigned To",
+    "priority": "Priority",
+    "unknown": "Unknown"
+  },
+  "auth": {
+    "signIn": "Sign In",
+    "signOut": "Sign Out",
+    "signingIn": "Signing in...",
+    "sessionExpired": "Your session has expired. Please sign in again.",
+    "unauthorized": "You don't have permission to access this resource."
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "welcomeBack": "Welcome back, {{name}}",
+    "openLeads": "Open Leads",
+    "openCases": "Open Cases",
+    "opportunities": "Opportunities",
+    "todaysTasks": "Today's Tasks",
+    "recentActivity": "Recent Activity"
+  },
+  "leads": {
+    "title": "Leads",
+    "newLead": "New Lead",
+    "editLead": "Edit Lead",
+    "deleteLead": "Delete Lead",
+    "convertLead": "Convert Lead",
+    "firstName": "First Name",
+    "lastName": "Last Name",
+    "company": "Company",
+    "jobTitle": "Job Title",
+    "source": "Lead Source",
+    "score": "Score",
+    "stage": "Stage",
+    "nextBestAction": "Next Best Action",
+    "deleteConfirm": "Are you sure you want to delete this lead?",
+    "stages": {
+      "new": "New",
+      "contacted": "Contacted",
+      "qualified": "Qualified",
+      "converted": "Converted",
+      "disqualified": "Disqualified"
+    }
+  },
+  "contacts": {
+    "title": "Contacts",
+    "newContact": "New Contact",
+    "editContact": "Edit Contact",
+    "deleteContact": "Delete Contact",
+    "firstName": "First Name",
+    "lastName": "Last Name",
+    "account": "Account",
+    "jobTitle": "Job Title",
+    "deleteConfirm": "Are you sure you want to delete this contact?"
+  },
+  "accounts": {
+    "title": "Accounts",
+    "newAccount": "New Account",
+    "editAccount": "Edit Account",
+    "deleteAccount": "Delete Account",
+    "industry": "Industry",
+    "website": "Website",
+    "employees": "Employees",
+    "annualRevenue": "Annual Revenue",
+    "deleteConfirm": "Are you sure you want to delete this account?"
+  },
+  "opportunities": {
+    "title": "Opportunities",
+    "newOpportunity": "New Opportunity",
+    "editOpportunity": "Edit Opportunity",
+    "deleteOpportunity": "Delete Opportunity",
+    "account": "Account",
+    "stage": "Stage",
+    "amount": "Amount",
+    "closeDate": "Expected Close",
+    "probability": "Probability",
+    "deleteConfirm": "Are you sure you want to delete this opportunity?",
+    "stages": {
+      "prospecting": "Prospecting",
+      "qualification": "Qualification",
+      "proposal": "Proposal",
+      "negotiation": "Negotiation",
+      "closedWon": "Closed Won",
+      "closedLost": "Closed Lost"
+    }
+  },
+  "cases": {
+    "title": "Cases",
+    "newCase": "New Case",
+    "editCase": "Edit Case",
+    "closeCase": "Close Case",
+    "escalate": "Escalate",
+    "subject": "Subject",
+    "contact": "Contact",
+    "account": "Account",
+    "priority": "Priority",
+    "category": "Category",
+    "slaStatus": "SLA Status",
+    "aiSummary": "AI Summary",
+    "sentiment": "Customer Sentiment",
+    "timeline": "Timeline",
+    "addComment": "Add Comment",
+    "comment": "Comment",
+    "deleteConfirm": "Are you sure you want to close this case?",
+    "statuses": {
+      "open": "Open",
+      "pending": "Pending",
+      "resolved": "Resolved",
+      "closed": "Closed"
+    },
+    "priorities": {
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "critical": "Critical"
+    }
+  },
+  "campaigns": {
+    "title": "Campaigns",
+    "newCampaign": "New Campaign",
+    "editCampaign": "Edit Campaign",
+    "startDate": "Start Date",
+    "endDate": "End Date",
+    "budget": "Budget",
+    "channel": "Channel",
+    "impressions": "Impressions",
+    "clicks": "Clicks",
+    "conversions": "Conversions"
+  },
+  "journeys": {
+    "title": "Journeys",
+    "newJourney": "New Journey",
+    "editJourney": "Edit Journey",
+    "enrollments": "Enrollments",
+    "activeEnrollments": "Active Enrollments",
+    "completed": "Completed"
+  },
+  "analytics": {
+    "title": "Analytics",
+    "dateRange": "Date Range",
+    "metric": "Metric",
+    "dimension": "Dimension",
+    "exportReport": "Export Report",
+    "noData": "No data available for the selected period"
+  },
+  "notifications": {
+    "title": "Notifications",
+    "markAllRead": "Mark All as Read",
+    "noNotifications": "No notifications",
+    "unread": "Unread"
+  },
+  "settings": {
+    "title": "Settings",
+    "promptTemplates": "Prompt Templates",
+    "connectors": "Integrations & Connectors",
+    "newTemplate": "New Template",
+    "editTemplate": "Edit Template",
+    "deleteTemplate": "Delete Template",
+    "templateName": "Template Name",
+    "capabilityType": "Capability",
+    "useCase": "Use Case",
+    "templateBody": "Template",
+    "deleteConfirm": "Are you sure you want to delete this prompt template?"
+  },
+  "ai": {
+    "title": "AI Jobs",
+    "status": {
+      "queued": "Queued",
+      "inProgress": "In Progress",
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "abandoned": "Abandoned"
+    },
+    "draftComposer": {
+      "title": "AI Draft Composer",
+      "generate": "Generate Draft",
+      "generating": "Generating...",
+      "insertDraft": "Insert Draft",
+      "placeholder": "Describe what you'd like the AI to draft..."
+    }
+  },
+  "pagination": {
+    "showing": "Showing {{from}}–{{to}} of {{total}}",
+    "rowsPerPage": "Rows per page"
+  },
+  "errors": {
+    "notFound": "Page not found",
+    "notFoundDetail": "The page you are looking for does not exist.",
+    "serverError": "Server error",
+    "serverErrorDetail": "Something went wrong. Please try again.",
+    "networkError": "Network error. Please check your connection."
+  }
+}

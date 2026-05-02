@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CrmPlatform.SfaService</RootNamespace>
+    <AssemblyName>CrmPlatform.SfaService</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisMode>All</AnalysisMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- EF Core + SQL Server -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design"    Version="8.0.0" PrivateAssets="all" />
+    <!-- Auth -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.0" />
+    <PackageReference Include="Microsoft.IdentityModel.Tokens"                Version="7.3.1" />
+    <!-- Resilience -->
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="8.0.0" />
+    <PackageReference Include="Polly"                                 Version="8.3.0" />
+    <PackageReference Include="Polly.Extensions.Http"                Version="3.0.0" />
+    <!-- Service Bus -->
+    <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.17.0" />
+    <!-- Health Checks -->
+    <PackageReference Include="AspNetCore.HealthChecks.SqlServer"       Version="8.0.0" />
+    <PackageReference Include="AspNetCore.HealthChecks.AzureServiceBus" Version="8.0.0" />
+    <!-- OpenTelemetry -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting"             Version="1.8.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore"     Version="1.8.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http"           Version="1.8.1" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
+    <!-- Problem Details (RFC 7807) -->
+    <PackageReference Include="Hellang.Middleware.ProblemDetails" Version="6.5.1" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <!-- Memory cache -->
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="8.0.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\_template\CrmPlatform.ServiceTemplate.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Tests/**/*.cs" />
+  </ItemGroup>
+  <PropertyGroup>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);CA1008;CA1031;CA1050;CA1062;CA1308;CA1512;CA1724;CA1848;CA1859;CA1862;CA2007;CS8602;CS9113</WarningsNotAsErrors>
+  </PropertyGroup>
+</Project>

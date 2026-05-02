@@ -1,0 +1,81 @@
+name: CI — Backend
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/services/**'
+      - 'src/functions/**'
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  COVERAGE_THRESHOLD: 80
+
+jobs:
+  build-and-test:
+    name: Build & Test — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - sfa-service
+          - css-service
+          - marketing-service
+          - analytics-service
+          - ai-orchestration-service
+          - identity-service
+          - integration-service
+          - notification-service
+          - platform-admin-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore src/services/${{ matrix.service }}
+
+      - name: Build
+        run: dotnet build src/services/${{ matrix.service }} --no-restore --configuration Release
+
+      - name: Test with coverage
+        run: |
+          dotnet test src/services/${{ matrix.service }} \
+            --no-build --configuration Release \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./coverage/${{ matrix.service }}
+
+      - name: Coverage gate (${{ env.COVERAGE_THRESHOLD }}% minimum)
+        run: |
+          # TODO: add coverage threshold enforcement (reportgenerator)
+          echo "Coverage gate to be wired up"
+
+  security-scan:
+    name: Security Scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: CodeQL SAST (C#)
+        uses: github/codeql-action/analyze@v3
+        with:
+          languages: csharp
+
+      - name: OWASP Dependency Check (SCA)
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'crm-platform'
+          path: 'src'
+          format: 'HTML'
+
+      - name: TruffleHog — Secret Scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD

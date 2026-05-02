@@ -1,0 +1,38 @@
+name: CI — IaC
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'infra/**'
+
+jobs:
+  validate:
+    name: Bicep Lint & Security
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Azure CLI
+        uses: azure/setup-azure-cli@v1
+
+      - name: Bicep build (compile check)
+        run: |
+          find infra -name '*.bicep' | while read f; do
+            echo "Compiling $f"
+            az bicep build --file "$f"
+          done
+
+      - name: PSRule — Azure Well-Architected linting
+        uses: microsoft/ps-rule@v2
+        with:
+          modules: PSRule.Rules.Azure
+          inputPath: infra/
+
+      - name: Checkov — IaC security scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: infra/
+          framework: bicep
+          soft_fail: false
